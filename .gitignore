@@ -1,0 +1,11 @@
+# secrets
+.env
+
+# build output
+/bin/
+/out/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

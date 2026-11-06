@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: composer
+      POSTGRES_PASSWORD: composer
+      POSTGRES_DB: composer
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U composer -d composer"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # One-shot job: applies migrations, then loads the seed if the users table is empty.
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgres://composer:composer@postgres:5432/composer?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  pgdata:
