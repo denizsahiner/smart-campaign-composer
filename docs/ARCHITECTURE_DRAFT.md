@@ -109,7 +109,8 @@ passes through a gate before it reaches SQL or the user.
       {"field": "city", "op": "eq", "value": "Istanbul"},
       {"field": "cart_added_days_ago", "op": "lte", "value": 30},
       {"field": "purchased_after_cart", "op": "eq", "value": false}
-    ]
+    ],
+    "unsupported_criteria": []
   }
   ```
   Only whitelisted fields/operators are allowed. This JSON is never run as SQL directly —
@@ -141,6 +142,15 @@ passes through a gate before it reaches SQL or the user.
     prompt, and the backend normalizes values (case + Turkish diacritics, e.g. "Istanbul" /
     "istanbul" → "İstanbul") before checking them against that list. An unknown city fails
     validation instead of silently producing a 0-person segment.
+  - Unsupported criteria: parts of the brief the DSL can't express (age, order value, a
+    city not in the data, "opened my last email") go to `unsupported_criteria` instead of
+    being approximated with another rule or dropped silently. The UI shows them, and the
+    marketer must explicitly acknowledge them before moving on to the messages step (the
+    API rejects the step otherwise): "Paris'te sepeti terk edenler" would otherwise become
+    every cart abandoner in every city behind a warning nobody read. An answer with no
+    rules but a reason there is final (the marketer has to
+    change the brief), not a repair case. A 0-person segment blocks the flow until the
+    brief is edited.
 
 - What does Claude return for the message step?
   ```json
@@ -159,15 +169,31 @@ passes through a gate before it reaches SQL or the user.
     after this event.
   - `event: retry`: validation failed and Claude is asked to fix it; the UI clears the
     draft and shows the new stream.
-  - `event: error`: retries exhausted; the UI shows the validation errors.
+  - `event: invalid`: repair attempts exhausted. The last draft is shown, editable, with
+    the failing fields marked (e.g. "SMS is 168 characters, cut 8"); the approve button
+    stays disabled until the content passes the same validator the approve endpoint runs.
+    The marketer is in the loop anyway, so a draft that is 8 characters too long is
+    handed to them instead of ending the flow.
+  - `event: error`: no usable answer at all (transport retries exhausted, refusal).
 
 - How is structured output obtained from Claude?
-  Each step (audience, messages) has its own JSON schema, and Claude is called with tool use
-  / structured output against that schema instead of "return only JSON" in the prompt. This
-  removes almost all parse failures (stray text, broken JSON). For the message step the
-  tool input streams as partial JSON deltas, which is what feeds the SSE stream.
-  Schema conformance is not business-rule conformance, so the backend validation below
-  still runs on every response.
+  Each step (audience, messages) has its own JSON schema, sent as a structured output
+  format (`output_config.format`) instead of "return only JSON" in the prompt. This
+  removes almost all parse failures (stray text, broken JSON). The answer is JSON text, so
+  for the message step the text deltas feed the SSE stream directly.
+  Forced tool use (`tool_choice: tool`) was the original plan; current models (Claude
+  Opus 5.5) reject it with a 400, and structured outputs is the replacement for exactly
+  this case.
+  The audience schema is generated from the segment whitelist, one `anyOf` variant per
+  field, so schema and validator can't drift apart. Cities are a free string, not an
+  enum: constrained decoding would force an unknown city ("Paris") onto a known one.
+  Structured outputs don't support `minimum`/`maximum`/`minLength`/`maxLength`, so the
+  1–365 day range and the character limits can only be enforced by the validator. Schema
+  conformance is not business-rule conformance, so the backend validation below runs on
+  every response.
+  Two steps, two schemas: the marketer sees the reach before messages are generated, the
+  messages need the segment's longest name, and a too-long SMS is repaired without
+  regenerating the segment.
 
 - What is checked before accepting Claude's output?
   - Valid JSON, matches expected schema
@@ -180,7 +206,10 @@ passes through a gate before it reaches SQL or the user.
     applied as-is (documented in DECISIONS.md).
   - Only known placeholders used (e.g. {{first_name}})
   - On failure: send the validation error back to Claude and ask it to fix it (see retries
-    below), then fail with a clear error instead of looping forever
+    below), then stop instead of looping forever (see `event: invalid`).
+    A repair round is the original request plus a user turn quoting the previous answer
+    and the errors; the previous assistant turn is not replayed, since current models
+    bind thinking blocks to the turn that produced them.
 
 - How are Claude calls retried?
   Two separate counters that never consume each other's budget:
@@ -362,9 +391,3 @@ passes through a gate before it reaches SQL or the user.
 ## Open decisions
 - Mock provider behavior (error/429/latency configuration, idempotency store, own rate
   limit, sent vs. delivered webhook) — to be decided.
-
-## Possible extensions
-- Unsupported criteria / empty segment: add `unsupported_criteria: string[]` to the
-  audience schema so Claude lists parts of the brief it can't map (e.g. "opened my last
-  email") instead of inventing rules; the UI shows them as warnings. A 0-person segment
-  blocks the flow until the brief is edited.
