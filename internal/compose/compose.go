@@ -65,6 +65,7 @@ type Call struct {
 	TransportAttempt int                     // transport retries so far in this step
 	InputTokens      int
 	OutputTokens     int
+	Model            string // the model that answered; "" when none did
 	Latency          time.Duration
 }
 
@@ -143,7 +144,7 @@ func (c *Composer) run(ctx context.Context, campaignID int64, original llm.Reque
 			continue
 		}
 
-		call.Raw, call.InputTokens, call.OutputTokens = res.Raw, res.InputTokens, res.OutputTokens
+		call.Raw, call.InputTokens, call.OutputTokens, call.Model = res.Raw, res.InputTokens, res.OutputTokens, res.Model
 		perr := parse(res.Raw)
 		var verr *validation.Error
 		if errors.As(perr, &verr) {

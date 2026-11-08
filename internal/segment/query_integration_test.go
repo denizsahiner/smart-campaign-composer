@@ -2,10 +2,7 @@ package segment
 
 import (
 	"context"
-	"fmt"
 	"maps"
-	"net/url"
-	"os"
 	"slices"
 	"testing"
 	"time"
@@ -13,50 +10,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/denizsahiner/smart-campaign-composer/internal/db"
+	"github.com/denizsahiner/smart-campaign-composer/internal/dbtest"
 	"github.com/denizsahiner/smart-campaign-composer/internal/seed"
 )
-
-// newTestDB creates a throwaway, migrated database on TEST_DATABASE_URL.
-// Skipped when TEST_DATABASE_URL is unset.
-// TODO: switch to testcontainers-go once the shared integration-test setup exists.
-func newTestDB(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	adminURL := os.Getenv("TEST_DATABASE_URL")
-	if adminURL == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, adminURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { admin.Close(ctx) })
-
-	name := fmt.Sprintf("segment_test_%d", time.Now().UnixNano())
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatal(err)
-	}
-	u, _ := url.Parse(adminURL)
-	u.Path = "/" + name
-	pool, err := pgxpool.New(ctx, u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		pool.Close()
-		admin.Exec(ctx, "DROP DATABASE "+name+" WITH (FORCE)")
-	})
-
-	sqlDB := stdlib.OpenDBFromPool(pool)
-	defer sqlDB.Close()
-	if err := db.Migrate(ctx, sqlDB); err != nil {
-		t.Fatal(err)
-	}
-	return pool
-}
 
 func matchedIDs(t *testing.T, pool *pgxpool.Pool, s Segment, asOf time.Time) map[int64]bool {
 	t.Helper()
@@ -80,7 +37,7 @@ func matchedIDs(t *testing.T, pool *pgxpool.Pool, s Segment, asOf time.Time) map
 // "lte 30" starts at Oct 8 00:00 Istanbul = Oct 7 21:00 UTC.
 func TestSegmentSQLBoundaries(t *testing.T) {
 	ctx := context.Background()
-	pool := newTestDB(t)
+	pool := dbtest.New(t)
 	asOf := istanbul(2026, 11, 7, 14, 0, 0)
 	µs := time.Microsecond // Postgres timestamptz precision
 
@@ -171,12 +128,8 @@ func names(ids map[int64]bool, idOf map[string]int64) []string {
 // semantics (DaysAgo) selects, across the whole seed, including the fixed edge cases.
 func TestSegmentSQLMatchesReference(t *testing.T) {
 	ctx := context.Background()
-	pool := newTestDB(t)
 	asOf := time.Now()
-	users, events := seed.Generate(seed.Options{Users: 5000, Seed: 42, Now: asOf})
-	if err := seed.Load(ctx, pool, users, events); err != nil {
-		t.Fatal(err)
-	}
+	pool, users, events := dbtest.Seeded(t, asOf)
 
 	cities, err := KnownCities(ctx, pool)
 	if err != nil {

@@ -62,6 +62,7 @@ func (m *Mock) Generate(ctx context.Context, req Request) (Response, error) {
 		Raw:          []byte(raw),
 		InputTokens:  approxTokens(req),
 		OutputTokens: utf8.RuneCountInString(raw)/4 + 1,
+		Model:        "mock",
 	}, nil
 }
 

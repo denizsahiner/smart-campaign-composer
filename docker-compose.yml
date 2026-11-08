@@ -26,5 +26,27 @@ services:
         condition: service_healthy
     restart: "no"
 
+  api:
+    build: .
+    command: ["api"]
+    environment:
+      DATABASE_URL: postgres://composer:composer@postgres:5432/composer?sslmode=disable
+    # ANTHROPIC_API_KEY, LLM_PROVIDER, ANTHROPIC_MODEL... Without a .env (or without a
+    # key in it) the API runs on the mock LLM.
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   pgdata:
