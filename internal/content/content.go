@@ -51,12 +51,22 @@ type Options struct {
 
 // Parse decodes and validates untrusted content JSON (the model's messages output).
 func Parse(raw []byte, opts Options) (Content, error) {
-	var in Content
-	if err := validation.DecodeStrict(raw, &in); err != nil {
-		return Content{}, validation.InvalidJSON(err)
+	in, err := Decode(raw)
+	if err != nil {
+		return Content{}, err
 	}
 	// A missing key decodes to "", which Validate reports as empty.
 	return Validate(in, opts)
+}
+
+// Decode only decodes content JSON strictly, without validating it. It's for showing an
+// invalid draft to the marketer to fix by hand; anything queued goes through Validate.
+func Decode(raw []byte) (Content, error) {
+	var c Content
+	if err := validation.DecodeStrict(raw, &c); err != nil {
+		return Content{}, validation.InvalidJSON(err)
+	}
+	return c, nil
 }
 
 // Validate checks typed content and returns it normalized: surrounding whitespace

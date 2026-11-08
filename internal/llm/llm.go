@@ -97,3 +97,17 @@ func IsRetryable(err error) bool {
 	var te *TransportError
 	return errors.As(err, &te) && te.Retryable()
 }
+
+// RefusalError means the model declined to answer (stop_reason "refusal"). It's neither a
+// transport failure nor a validation failure: retrying or repairing won't change it.
+type RefusalError struct {
+	Category    string
+	Explanation string
+}
+
+func (e *RefusalError) Error() string {
+	if e.Category == "" {
+		return "llm: the model declined to answer"
+	}
+	return "llm: the model declined to answer (" + e.Category + ")"
+}

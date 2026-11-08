@@ -20,11 +20,26 @@ import (
 const Version = "2026-11-08.1"
 
 // briefBlock wraps the marketer's brief in tags the system prompt tells the model to
-// treat as data. A closing tag inside the brief is neutralized so the brief can't end
-// the block early and smuggle in text that reads as instructions.
-func briefBlock(brief string) string {
-	brief = strings.ReplaceAll(strings.TrimSpace(brief), "</brief>", "</ brief>")
-	return "<brief>\n" + brief + "\n</brief>"
+// treat as data.
+func briefBlock(brief string) string { return block("brief", brief) }
+
+// block wraps text in <tag> … </tag>. A closing tag inside the text is neutralized so the
+// text can't end the block early and smuggle in something that reads as instructions.
+func block(tag, text string) string {
+	text = strings.ReplaceAll(strings.TrimSpace(text), "</"+tag+">", "</ "+tag+">")
+	return "<" + tag + ">\n" + text + "\n</" + tag + ">"
+}
+
+// jsonText marshals v for quoting inside a prompt. Unlike json.Marshal it keeps &, < and >
+// as they are, so the model reads "%30 & ücretsiz kargo", not "\u0026".
+func jsonText(v any) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		panic(err)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func mustJSON(v any) []byte {
