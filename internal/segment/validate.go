@@ -3,17 +3,16 @@ package segment
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"slices"
 	"strings"
+
+	"github.com/denizsahiner/smart-campaign-composer/internal/validation"
 )
 
 // Error codes. They're stable so tests, llm_calls.validation_errors and the UI can rely
-// on them; Message is the human/LLM-readable part used in repair prompts.
+// on them; the message is the human/LLM-readable part used in repair prompts.
 const (
-	CodeInvalidJSON    = "invalid_json"
 	CodeNoRules        = "no_rules"
 	CodeUnknownField   = "unknown_field"
 	CodeForbiddenField = "forbidden_field"
@@ -26,26 +25,8 @@ const (
 	CodeEmptyRange     = "empty_range"
 )
 
-// FieldError is one problem in the input, located by a JSON path like "rules[1].value".
-type FieldError struct {
-	Path    string `json:"path"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-// ValidationError lists every problem found, not just the first, so a single repair
-// round can fix all of them.
-type ValidationError struct {
-	Errors []FieldError `json:"errors"`
-}
-
-func (e *ValidationError) Error() string {
-	msgs := make([]string, len(e.Errors))
-	for i, fe := range e.Errors {
-		msgs[i] = fe.Path + ": " + fe.Message
-	}
-	return "invalid segment: " + strings.Join(msgs, "; ")
-}
+// FieldError is the shared error shape; see package validation.
+type FieldError = validation.FieldError
 
 // Validator checks segment JSON against the whitelist and the known city list.
 type Validator struct {
@@ -82,19 +63,17 @@ type rawRule struct {
 
 // Parse decodes and validates untrusted segment JSON. On success the returned Segment has
 // normalized values (canonical city names, deduplicated "in" lists) and is accepted by
-// Build. On failure the error is a *ValidationError.
+// Build. On failure the error is a *validation.Error.
 func (v *Validator) Parse(raw []byte) (Segment, error) {
 	var in rawSegment
-	if err := decodeStrict(raw, &in); err != nil {
-		return Segment{}, &ValidationError{Errors: []FieldError{{
-			Path: "$", Code: CodeInvalidJSON, Message: err.Error(),
-		}}}
+	if err := validation.DecodeStrict(raw, &in); err != nil {
+		return Segment{}, validation.InvalidJSON(err)
 	}
 	if in.Rules == nil || len(*in.Rules) == 0 {
 		// An empty rule list would target every user. That's never what a brief means,
 		// and it's the failure mode of a model that couldn't map the brief, so it's
 		// rejected rather than silently becoming "send to everyone".
-		return Segment{}, &ValidationError{Errors: []FieldError{{
+		return Segment{}, &validation.Error{Errors: []FieldError{{
 			Path: "rules", Code: CodeNoRules, Message: "at least one rule is required",
 		}}}
 	}
@@ -111,8 +90,8 @@ func (v *Validator) Parse(raw []byte) (Segment, error) {
 		seg.Rules = append(seg.Rules, r)
 	}
 	errs = append(errs, crossRuleErrors(seg.Rules)...)
-	if len(errs) > 0 {
-		return Segment{}, &ValidationError{Errors: errs}
+	if err := validation.OrNil(errs); err != nil {
+		return Segment{}, err
 	}
 	seg.validated = true
 	return seg, nil
@@ -123,16 +102,16 @@ func (v *Validator) parseRule(path string, rr rawRule) (Rule, *FieldError) {
 	ops, ok := allowedOps[field]
 	if !ok {
 		if why, forbidden := forbiddenFields[rr.Field]; forbidden {
-			return Rule{}, &FieldError{path + ".field", CodeForbiddenField,
-				fmt.Sprintf("field %q is not allowed: %s", rr.Field, why)}
+			return Rule{}, fieldErr(path+".field", CodeForbiddenField,
+				fmt.Sprintf("field %q is not allowed: %s", rr.Field, why))
 		}
-		return Rule{}, &FieldError{path + ".field", CodeUnknownField,
-			fmt.Sprintf("unknown field %q; allowed fields: %s", rr.Field, fieldList())}
+		return Rule{}, fieldErr(path+".field", CodeUnknownField,
+			fmt.Sprintf("unknown field %q; allowed fields: %s", rr.Field, fieldList()))
 	}
 	op := Op(rr.Op)
 	if !slices.Contains(ops, op) {
-		return Rule{}, &FieldError{path + ".op", CodeOpNotAllowed,
-			fmt.Sprintf("op %q is not allowed for field %q; allowed: %s", rr.Op, field, joinOps(ops))}
+		return Rule{}, fieldErr(path+".op", CodeOpNotAllowed,
+			fmt.Sprintf("op %q is not allowed for field %q; allowed: %s", rr.Op, field, joinOps(ops)))
 	}
 
 	vpath := path + ".value"
@@ -155,8 +134,8 @@ func (v *Validator) parseRule(path string, rr rawRule) (Rule, *FieldError) {
 			return Rule{}, wrongType(vpath, "an array of strings")
 		}
 		if len(ss) == 0 || len(ss) > MaxInValues {
-			return Rule{}, &FieldError{vpath, CodeOutOfRange,
-				fmt.Sprintf("must contain 1-%d cities, got %d", MaxInValues, len(ss))}
+			return Rule{}, fieldErr(vpath, CodeOutOfRange,
+				fmt.Sprintf("must contain 1-%d cities, got %d", MaxInValues, len(ss)))
 		}
 		out := make([]string, 0, len(ss))
 		for _, s := range ss {
@@ -177,8 +156,8 @@ func (v *Validator) parseRule(path string, rr rawRule) (Rule, *FieldError) {
 		}
 		s = strings.ToLower(strings.TrimSpace(s))
 		if !slices.Contains(Languages, s) {
-			return Rule{}, &FieldError{vpath, CodeUnknownLang,
-				fmt.Sprintf("unknown language %q; allowed: %s", s, strings.Join(Languages, ", "))}
+			return Rule{}, fieldErr(vpath, CodeUnknownLang,
+				fmt.Sprintf("unknown language %q; allowed: %s", s, strings.Join(Languages, ", ")))
 		}
 		r.Value = s
 
@@ -198,8 +177,8 @@ func (v *Validator) parseRule(path string, rr rawRule) (Rule, *FieldError) {
 			return Rule{}, wrongType(vpath, "an integer")
 		}
 		if days < MinDays || days > MaxDays {
-			return Rule{}, &FieldError{vpath, CodeOutOfRange,
-				fmt.Sprintf("must be between %d and %d, got %d", MinDays, MaxDays, days)}
+			return Rule{}, fieldErr(vpath, CodeOutOfRange,
+				fmt.Sprintf("must be between %d and %d, got %d", MinDays, MaxDays, days))
 		}
 		r.Value = int(days)
 
@@ -232,39 +211,30 @@ func crossRuleErrors(rules []Rule) []FieldError {
 			}
 		}
 		if first, dup := seen[key]; dup {
-			errs = append(errs, FieldError{fmt.Sprintf("rules[%d]", i), CodeDuplicateRule,
-				fmt.Sprintf("duplicates rules[%d]; use a single rule per field (for several cities use op \"in\")", first)})
+			errs = append(errs, *fieldErr(fmt.Sprintf("rules[%d]", i), CodeDuplicateRule,
+				fmt.Sprintf("duplicates rules[%d]; use a single rule per field (for several cities use op \"in\")", first)))
 			continue
 		}
 		seen[key] = i
 	}
 	if lte != nil && gte != nil && *gte > *lte {
-		errs = append(errs, FieldError{"rules", CodeEmptyRange,
-			fmt.Sprintf("cart_added_days_ago gte %d and lte %d can never both be true", *gte, *lte)})
+		errs = append(errs, *fieldErr("rules", CodeEmptyRange,
+			fmt.Sprintf("cart_added_days_ago gte %d and lte %d can never both be true", *gte, *lte)))
 	}
 	return errs
 }
 
 func (v *Validator) unknownCity(path, got string) *FieldError {
-	return &FieldError{path, CodeUnknownCity,
-		fmt.Sprintf("unknown city %q; known cities: %s", got, strings.Join(v.cityList, ", "))}
+	return fieldErr(path, CodeUnknownCity,
+		fmt.Sprintf("unknown city %q; known cities: %s", got, strings.Join(v.cityList, ", ")))
+}
+
+func fieldErr(path, code, msg string) *FieldError {
+	return &FieldError{Path: path, Code: code, Message: msg}
 }
 
 func wrongType(path, want string) *FieldError {
-	return &FieldError{path, CodeWrongType, "must be " + want}
-}
-
-// decodeStrict rejects unknown keys and trailing data after the JSON value.
-func decodeStrict(raw []byte, dst any) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return errors.New("unexpected data after the JSON object")
-	}
-	return nil
+	return fieldErr(path, CodeWrongType, "must be "+want)
 }
 
 // decodeValue decodes a rule value. JSON null and type mismatches both report false

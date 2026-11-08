@@ -9,6 +9,7 @@ import (
 	"slices"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -250,7 +251,7 @@ func TestSegmentSQLMatchesReference(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := map[int64]bool{}
-			wantSMS, wantEmail := 0, 0
+			wantSMS, wantEmail, wantLongest := 0, 0, 0
 			for _, u := range users {
 				var lc *time.Time
 				if at, ok := lastCart[u.ID]; ok {
@@ -258,6 +259,7 @@ func TestSegmentSQLMatchesReference(t *testing.T) {
 				}
 				if c.ref(u, lc, boughtAfter[u.ID]) {
 					want[u.ID] = true
+					wantLongest = max(wantLongest, utf8.RuneCountInString(u.FirstName))
 					if u.SMSConsent && u.Phone != nil {
 						wantSMS++
 					}
@@ -278,7 +280,7 @@ func TestSegmentSQLMatchesReference(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if wantC := (Counts{len(want), wantSMS, wantEmail}); counts != wantC {
+			if wantC := (Counts{len(want), wantSMS, wantEmail, wantLongest}); counts != wantC {
 				t.Fatalf("counts = %+v, want %+v", counts, wantC)
 			}
 		})

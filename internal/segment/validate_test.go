@@ -4,6 +4,8 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+
+	"github.com/denizsahiner/smart-campaign-composer/internal/validation"
 )
 
 var testCities = []string{"İstanbul", "Ankara", "İzmir", "Eskişehir", "Muğla"}
@@ -63,10 +65,10 @@ func TestParseRejects(t *testing.T) {
 		name, raw  string
 		code, path string
 	}{
-		{"not json", `{"rules":[`, CodeInvalidJSON, "$"},
-		{"trailing text", `{"rules":[{"field":"language","op":"eq","value":"tr"}]} sure!`, CodeInvalidJSON, "$"},
-		{"unknown top-level key", `{"rules":[{"field":"language","op":"eq","value":"tr"}],"or":[]}`, CodeInvalidJSON, "$"},
-		{"unknown rule key", `{"rules":[{"field":"language","op":"eq","value":"tr","not":true}]}`, CodeInvalidJSON, "$"},
+		{"not json", `{"rules":[`, validation.CodeInvalidJSON, "$"},
+		{"trailing text", `{"rules":[{"field":"language","op":"eq","value":"tr"}]} sure!`, validation.CodeInvalidJSON, "$"},
+		{"unknown top-level key", `{"rules":[{"field":"language","op":"eq","value":"tr"}],"or":[]}`, validation.CodeInvalidJSON, "$"},
+		{"unknown rule key", `{"rules":[{"field":"language","op":"eq","value":"tr","not":true}]}`, validation.CodeInvalidJSON, "$"},
 		{"missing rules", `{}`, CodeNoRules, "rules"},
 		{"empty rules", `{"rules":[]}`, CodeNoRules, "rules"},
 		{"unknown field", `{"rules":[{"field":"age","op":"gte","value":18}]}`, CodeUnknownField, "rules[0].field"},
@@ -95,9 +97,9 @@ func TestParseRejects(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := v.Parse([]byte(c.raw))
-			var ve *ValidationError
+			var ve *validation.Error
 			if !errors.As(err, &ve) {
-				t.Fatalf("err = %v, want *ValidationError", err)
+				t.Fatalf("err = %v, want *validation.Error", err)
 			}
 			if len(ve.Errors) != 1 || ve.Errors[0].Code != c.code || ve.Errors[0].Path != c.path {
 				t.Fatalf("errors = %+v, want one %s at %s", ve.Errors, c.code, c.path)
@@ -112,7 +114,7 @@ func TestParseReportsAllErrors(t *testing.T) {
 		{"field":"city","op":"eq","value":"Paris"},
 		{"field":"email_consent","op":"eq","value":true},
 		{"field":"cart_added_days_ago","op":"lte","value":999}]}`))
-	var ve *ValidationError
+	var ve *validation.Error
 	if !errors.As(err, &ve) || len(ve.Errors) != 3 {
 		t.Fatalf("err = %v, want 3 errors", err)
 	}

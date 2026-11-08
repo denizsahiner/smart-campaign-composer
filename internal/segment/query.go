@@ -86,6 +86,9 @@ type Counts struct {
 	Total int `json:"total"`
 	SMS   int `json:"sms"`
 	Email int `json:"email"`
+	// LongestFirstName is the longest first_name in the segment, in characters; content
+	// length limits are checked against it (content.Options).
+	LongestFirstName int `json:"longest_first_name"`
 }
 
 // CountSQL returns one query that computes Counts in a single pass over the segment.
@@ -96,7 +99,9 @@ func CountSQL(s Segment, asOf time.Time) (string, []any, error) {
 	}
 	q := "SELECT count(*), " +
 		"count(*) FILTER (WHERE " + SMSReachable + "), " +
-		"count(*) FILTER (WHERE " + EmailReachable + ") " +
+		"count(*) FILTER (WHERE " + EmailReachable + "), " +
+		// char_length counts characters like utf8.RuneCountInString, not bytes.
+		"coalesce(max(char_length(u.first_name)), 0) " +
 		"FROM users u WHERE " + where
 	return q, args, nil
 }
@@ -114,7 +119,7 @@ func Count(ctx context.Context, db Querier, s Segment, asOf time.Time) (Counts, 
 		return Counts{}, err
 	}
 	var c Counts
-	if err := db.QueryRow(ctx, q, args...).Scan(&c.Total, &c.SMS, &c.Email); err != nil {
+	if err := db.QueryRow(ctx, q, args...).Scan(&c.Total, &c.SMS, &c.Email, &c.LongestFirstName); err != nil {
 		return Counts{}, fmt.Errorf("count segment: %w", err)
 	}
 	return c, nil
