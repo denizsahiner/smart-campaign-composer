@@ -272,6 +272,38 @@ passes through a gate before it reaches SQL or the user.
   (e.g. first malformed JSON, then a non-whitelisted field, then a valid answer) to exercise
   the validate → repair → retry loop and its "give up after N" path.
 
+## API
+Plain JSON over `net/http`; no auth (single-marketer demo).
+
+| Method & path | Does |
+|---|---|
+| `POST /api/campaigns` `{brief}` | creates a campaign and runs the audience step |
+| `POST /api/campaigns/{id}/audience` `{brief}` | new brief, audience step again; clears the draft |
+| `POST /api/campaigns/{id}/acknowledge` | acknowledges unsupported criteria |
+| `POST /api/campaigns/{id}/messages` `{feedback?}` | messages step as an SSE stream; `feedback` revises the stored draft |
+| `GET /api/campaigns`, `GET /api/campaigns/{id}` | read |
+| `GET /healthz` | DB ping |
+
+- The messages stream is a `POST` (it creates content), read by the frontend with
+  `fetch`; `EventSource` can only `GET`. Preconditions (audience exists, unsupported
+  criteria acknowledged, reach > 0, campaign not approved) are checked before the stream
+  starts and fail as ordinary JSON errors.
+- The final `validated` / `invalid` event is sent only after the draft is stored, so a
+  client that reloads on it finds the content. A client that disconnects cancels the
+  model call and nothing is stored.
+- One LLM step per campaign at a time: a second generation, or an audience change during
+  one, gets `409 busy`. The lock is in memory, which holds because the API runs as one
+  replica.
+- An LLM outcome is not an HTTP error. An unmappable brief, an invalid audience after
+  repairs, or Claude being unavailable come back as `200`/`201` with `audience_error`
+  (or an `error` event in the stream); HTTP errors are for bad requests (`400`, `404`,
+  `409`, `422`) and bugs (`500`). A transient failure (Claude busy) leaves the campaign
+  unchanged; a brief-related failure stores the new brief and clears the old audience.
+- A new audience resets the campaign to `draft` and clears the draft and the
+  acknowledgement: lengths, wording and the unsupported list all depend on the segment.
+- The runtime image has no shell or curl, so the compose healthcheck runs
+  `/app healthcheck`, which calls `/healthz`.
+
 ## Sending
 - What happens when the marketer clicks "approve"?
   The approve request carries the final (possibly edited) content. It runs through the same
