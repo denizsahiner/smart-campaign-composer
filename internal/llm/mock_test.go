@@ -148,7 +148,10 @@ func TestNewSelectsProvider(t *testing.T) {
 		{Config{}, "mock", false},
 		{Config{Provider: "mock", APIKey: "sk-x"}, "mock", false},
 		{Config{Provider: "claude"}, "mock", false}, // no key → mock, so compose up works
-		{Config{Provider: "claude", APIKey: "sk-x"}, "", true},
+		{Config{Provider: "claude", APIKey: "sk-x"}, "claude:claude-sonnet-5-5", false},
+		{Config{APIKey: "sk-x"}, "claude:claude-sonnet-5-5", false}, // a key alone selects Claude
+		{Config{APIKey: "sk-x", Model: "claude-opus-5-5"}, "claude:claude-opus-5-5", false},
+		{Config{APIKey: "sk-x", EffortMessages: "extreme"}, "", true},
 		{Config{Provider: "gpt", APIKey: "sk-x"}, "", true},
 	}
 	for _, c := range cases {

@@ -25,7 +25,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: app migrate")
+		fmt.Fprintln(os.Stderr, "usage: app migrate | llm-try \"<brief>\"")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -35,6 +35,8 @@ func main() {
 	switch os.Args[1] {
 	case "migrate":
 		err = runMigrate(ctx)
+	case "llm-try":
+		err = runLLMTry(ctx, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 		os.Exit(2)

@@ -51,6 +51,9 @@ type Response struct {
 	Raw          []byte
 	InputTokens  int
 	OutputTokens int
+	// Model is the model that produced the answer. It can differ from the requested
+	// one after a server-side refusal fallback.
+	Model string
 }
 
 // Client is implemented by the Claude client and by Mock.

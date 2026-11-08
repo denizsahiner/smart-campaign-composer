@@ -30,3 +30,12 @@ var mobilePrefixes = []string{
 	"530", "532", "533", "535", "536", "538", "539", "541", "542", "543",
 	"544", "545", "546", "549", "551", "552", "553", "554", "555",
 }
+
+// Cities returns the city names the generator uses, i.e. every city in a seeded database.
+func Cities() []string {
+	out := make([]string, len(cities))
+	for i, c := range cities {
+		out[i] = c.value
+	}
+	return out
+}
