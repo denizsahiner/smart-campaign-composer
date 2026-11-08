@@ -157,3 +157,19 @@ func renderedLen(s string, nameRunes int) (length, placeholders int) {
 	length = utf8.RuneCountInString(s) - placeholders*utf8.RuneCountInString(Placeholder) + placeholders*nameRunes
 	return length, placeholders
 }
+
+// JSONSchema is the structured-output schema for the messages step. Length limits can't
+// be expressed (structured outputs don't support maxLength); Validate enforces them.
+func JSONSchema() map[string]any {
+	str := map[string]any{"type": "string"}
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"sms":           str,
+			"email_subject": str,
+			"email_body":    str,
+		},
+		"required":             []string{"sms", "email_subject", "email_body"},
+		"additionalProperties": false,
+	}
+}

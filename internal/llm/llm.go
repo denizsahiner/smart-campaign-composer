@@ -24,34 +24,29 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
-// Message is one conversation turn. In a repair round, an assistant turn carries the
-// model's previous raw output and the following user turn carries the validation errors;
-// the Claude client maps that pair to a tool_use / tool_result (is_error) exchange.
+// Message is one conversation turn. Repair rounds don't replay the model's previous turn;
+// they send a fresh user turn that quotes the previous output and the validation errors
+// (see package prompt), so no assistant turn is ever edited or replayed.
 type Message struct {
 	Role    Role
 	Content string
-}
-
-// Tool is the structured-output contract for a step: the model must answer by "calling"
-// it, so its answer is JSON matching InputSchema rather than free text.
-type Tool struct {
-	Name        string
-	Description string
-	InputSchema []byte // JSON Schema
 }
 
 type Request struct {
 	Step     Step
 	System   string
 	Messages []Message
-	Tool     Tool
-	// OnDelta, if set, receives the tool-input JSON as it is generated, in order. Chunks
-	// are partial JSON (not valid on their own) and always split on rune boundaries.
+	// Schema is the JSON Schema the answer must follow. The Claude client sends it as a
+	// structured output format (output_config.format), so the answer is JSON text
+	// matching the schema. Forced tool use isn't an option: current models reject it.
+	Schema []byte
+	// OnDelta, if set, receives the answer as it is generated, in order. Chunks are
+	// partial JSON (not valid on their own) and always split on rune boundaries.
 	OnDelta func(chunk string)
 }
 
 type Response struct {
-	// Raw is the tool input exactly as the model produced it: unparsed and unvalidated.
+	// Raw is the answer exactly as the model produced it: unparsed and unvalidated.
 	// It may be malformed JSON; that's the caller's validation's job to catch.
 	Raw          []byte
 	InputTokens  int
