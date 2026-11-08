@@ -56,6 +56,12 @@ errors in the user turn; the model's previous turn is not replayed. Current mode
 thinking blocks to the turn that produced them, so replaying or editing that turn is
 fragile, and starting from the original request keeps every round the same size.
 
+### Retry budgets are per step
+
+At most 2 repair rounds and 2 transport retries per step, so at most 5 calls. Per-call
+transport budgets would allow 3 × 3 = 9 calls while the marketer watches a spinner. A
+`retry-after` over 10 s fails at once with "Claude is busy" instead of waiting.
+
 ### Exhausted repairs hand the draft to the marketer
 
 If the messages are still invalid after the repair attempts (most likely an SMS a few
@@ -64,6 +70,9 @@ approve button stays disabled until it passes validation. The approve endpoint r
 same validator, so this is safe, and the marketer, who is in the loop anyway, can cut 8
 characters faster than starting over. Failing outright is reserved for having no usable
 answer at all.
+
+The audience step has no such fallback: a segment isn't something the marketer edits by
+hand, so the errors are shown and the brief is edited instead.
 
 ## Audience
 
@@ -128,3 +137,14 @@ the variable in other syntaxes (`%first_name%`, `[FirstName]`) are rejected too.
   looks like one too, so this gains little and makes the rule harder to explain.
 - **Same rules everywhere:** the model's draft and the marketer's edited content at
   approval go through the same validator.
+
+## Sending
+
+### Mock provider: synchronous, with configurable failures
+
+The mock SMS/email provider answers each request immediately (sent or an error) and has
+no delivery webhooks. Its failure rates (5xx, 429 with `Retry-After`, timeouts, latency)
+are configurable, with non-zero defaults so every run exercises retries and rate
+limiting; it enforces its own 100/s per channel and deduplicates by `message_id`. A
+delivered/failed webhook would be more realistic but adds an endpoint and states without
+changing what the case asks us to show: retries, rate limiting and no duplicates.

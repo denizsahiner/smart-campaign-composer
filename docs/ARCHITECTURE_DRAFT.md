@@ -176,6 +176,15 @@ passes through a gate before it reaches SQL or the user.
     handed to them instead of ending the flow.
   - `event: error`: no usable answer at all (transport retries exhausted, refusal).
 
+  Guided regeneration: the marketer can ask for a new version with a short note ("more
+  formal", "lead with the discount"). The request quotes the previous draft and the note;
+  it's an ordinary messages step with the same validation, repairs and events. Manual
+  editing stays available.
+
+  The audience step has no editable fallback: if repairs run out, the last validation
+  errors are shown in plain words ("Paris is not in the data") and the marketer edits the
+  brief. A segment editor UI is out of scope.
+
 - How is structured output obtained from Claude?
   Each step (audience, messages) has its own JSON schema, sent as a structured output
   format (`output_config.format`) instead of "return only JSON" in the prompt. This
@@ -220,11 +229,18 @@ passes through a gate before it reaches SQL or the user.
     spelling) are normalized before validation; fixes that need meaning preserved
     (shortening copy — truncating would cut "…%30 indi") go back to Claude with a concrete
     error, e.g. "SMS is 178 chars, limit 160: shorten by 18+; `{{first_name}}` can be up to
-    12 chars". At most 2 repair attempts (3 calls total).
+    12 chars". At most 2 repair attempts per step.
   - Transport retry: the request didn't get a usable response — timeout, 429, 529, 5xx.
-    Exponential backoff with jitter (1s → 2s → 4s), at most 3 attempts. The marketer is
-    waiting on screen, so the budget is short: if `retry-after` exceeds ~10s, fail
-    immediately with "Claude is busy, try again" instead of waiting. 400/401 are not retried.
+    Exponential backoff with equal jitter (between d/2 and d for d = 1s, 2s), at most 2
+    retries per step; `retry-after` is respected when longer than the backoff. The
+    marketer is waiting on screen, so the budget is short: if `retry-after` exceeds 10s,
+    fail immediately with "Claude is busy, try again" instead of waiting. 400/401 and
+    refusals are not retried.
+  - Both budgets are per step, not per call, so a step makes at most 1 + 2 + 2 = 5 calls
+    (per-call transport budgets would allow 3 × 3 = 9). A transport retry resends the
+    same request, so a retry in the middle of a repair round resends that repair.
+  - Every call, failed ones included, is written to `llm_calls` with its repair and
+    transport attempt numbers, even if the marketer's request was cancelled meanwhile.
   - Timeouts: 15s to first token, 20s idle between tokens (a single total timeout would
     kill legitimately long email generations).
   - Streaming: transport retry is silent only before the first token. If the stream breaks
@@ -388,6 +404,15 @@ passes through a gate before it reaches SQL or the user.
   chosen over unit-only because the reliability guarantees live in Postgres behavior
   (`SKIP LOCKED`, `ON CONFLICT`) that mocks can't prove.
 
-## Open decisions
-- Mock provider behavior (error/429/latency configuration, idempotency store, own rate
-  limit, sent vs. delivered webhook) — to be decided.
+## Mock provider
+- Synchronous: each request returns sent or an error immediately; no delivery webhooks.
+- Failure injection configurable by environment variables, with defaults of 5% 5xx, 5%
+  429 with `Retry-After`, 1% timeouts and 50–300 ms latency, so retry and rate-limit
+  logic is exercised on every run.
+- Its own limit of 100 messages/s per channel; exceeding it returns 429.
+- Idempotent by `message_id`: a repeated id returns the original result without sending
+  again, so a retry after a timeout can't produce a duplicate.
+
+## Scope
+- Bonus features (scheduled sending, A/B variants, content in the user's language, CI)
+  are out of scope for now; the core flow comes first.
