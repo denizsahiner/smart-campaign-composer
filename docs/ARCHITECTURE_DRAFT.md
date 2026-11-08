@@ -123,11 +123,18 @@ passes through a gate before it reaches SQL or the user.
     |------------------------|------------------------|-------------------------------|---------|
     | `city`                 | `eq`, `in`             | string / string[] (known city)| `users.city` |
     | `language`             | `eq`                   | `"tr"` \| `"en"`              | `users.language` |
-    | `cart_added_days_ago`  | `lte`, `gte`           | int, 1–365                    | days since the user's **most recent** `cart_add` event; users with no `cart_add` never match |
-    | `purchased_after_cart` | `eq`                   | bool                          | whether a `purchase` event exists **after the most recent** `cart_add` |
+    | `cart_added_days_ago`  | `lte`, `gte`           | int, 1–365                    | calendar days (Europe/Istanbul) between the user's **most recent** `cart_add` and the reference time: today = 0, yesterday = 1; users with no `cart_add` never match |
+    | `purchased_after_cart` | `eq`                   | bool                          | whether a `purchase` event exists strictly **after the most recent** `cart_add`; users with no `cart_add` never match (for either value) |
 
     So "added to cart in the last 30 days but didn't buy" = `cart_added_days_ago lte 30`
     AND `purchased_after_cart eq false`.
+  - Day windows are calendar days, not rolling 24h windows: with a reference time of
+    Nov 7 14:00, `lte 30` starts at Oct 8 00:00 Istanbul time (Oct 7 21:00 UTC). The
+    boundary instants are computed in Go and passed as `timestamptz` parameters.
+  - The reference time (`as_of`) is pinned when the audience is previewed and reused at
+    approval, so the window doesn't move between the two (e.g. across midnight). The
+    segment itself is still re-evaluated at approval, so consent changes and new events
+    are picked up.
   - Any other field, an operator not allowed for that field, a wrong value type, or an
     out-of-range value fails validation.
   - City normalization: the list of cities present in the data is given to Claude in the

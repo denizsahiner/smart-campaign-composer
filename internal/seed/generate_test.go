@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/denizsahiner/smart-campaign-composer/internal/segment"
 )
 
 var testNow = time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
@@ -103,7 +105,7 @@ func TestEdgeCases(t *testing.T) {
 }
 
 // abandonedCarts mirrors the DSL semantics: the most recent cart_add is at most `days`
-// whole days old and no purchase happened after it.
+// calendar days ago (segment.DaysAgo) and no purchase happened after it.
 func abandonedCarts(users []User, events []Event, city string, days int) map[int64]bool {
 	lastCart := map[int64]time.Time{}
 	for _, e := range events {
@@ -120,7 +122,7 @@ func abandonedCarts(users []User, events []Event, city string, days int) map[int
 	matched := map[int64]bool{}
 	for _, u := range users {
 		c, ok := lastCart[u.ID]
-		if ok && u.City == city && !boughtAfter[u.ID] && int(testNow.Sub(c)/day) <= days {
+		if ok && u.City == city && !boughtAfter[u.ID] && segment.DaysAgo(testNow, c) <= days {
 			matched[u.ID] = true
 		}
 	}
