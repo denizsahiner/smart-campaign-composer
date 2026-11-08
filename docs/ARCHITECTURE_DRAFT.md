@@ -241,14 +241,26 @@ passes through a gate before it reaches SQL or the user.
     same request, so a retry in the middle of a repair round resends that repair.
   - Every call, failed ones included, is written to `llm_calls` with its repair and
     transport attempt numbers, even if the marketer's request was cancelled meanwhile.
-  - Timeouts: 15s to first token, 20s idle between tokens (a single total timeout would
-    kill legitimately long email generations).
+  - Timeouts: 15s for the stream to start, 20s idle between stream events (a single
+    total timeout would kill legitimately long email generations). Both are timeout
+    transport errors, retried like any other; a stall after output started is marked
+    partial so the UI discards the draft.
   - Streaming: transport retry is silent only before the first token. If the stream breaks
     mid-way, the UI gets `event: retry` and generation restarts (a half-received JSON can't
     be resumed).
   - The Anthropic SDK's built-in retries are disabled (`WithMaxRetries(0)`) so retries
-    don't stack (3 × 3 = 9 attempts) and the rules above stay in our control. Verify the
-    SDK defaults when implementing.
+    don't stack and the rules above stay in our control. Verified: the Go SDK (v2.7) retries
+    twice by default, which would turn one 429 with `retry-after: 7` into 3 requests and
+    14s of hidden waiting; a test asserts one request per call.
+  - Errors are classified from the HTTP status, or, for an error event inside a 200
+    stream (e.g. `overloaded_error` mid-generation), from the error type. A refusal
+    (`stop_reason: refusal`) is neither retried nor repaired; with `fallbacks: "default"`
+    the API first re-runs a declined request on another model server-side (not on Haiku,
+    which has no fallback). `max_tokens` truncation is an error, not a repair case.
+  - Model and per-step effort are configuration (`ANTHROPIC_MODEL`,
+    `LLM_EFFORT_AUDIENCE` / `LLM_EFFORT_MESSAGES`; defaults Claude Sonnet 5.5, `low` /
+    `medium`). The default was chosen by running the same briefs through Sonnet 5.5 and
+    Opus 5.5 (`make llm-try`); see DECISIONS.md.
 
 - How is the LLM swapped out for tests and local development?
   `LLMClient` is an interface with two implementations:
@@ -416,3 +428,23 @@ passes through a gate before it reaches SQL or the user.
 ## Scope
 - Bonus features (scheduled sending, A/B variants, content in the user's language, CI)
   are out of scope for now; the core flow comes first.
+
+## Later
+- Message language. Today the messages are written in the brief's language. That breaks
+  when the segment targets the other language: a Turkish brief for users whose
+  `users.language` is `en` produces Turkish messages for English-preferring users (seen
+  in the model comparison). Planned, in two parts:
+  - Single-language segments (`language eq en` / `eq tr`): tell the messages prompt to
+    write in that language instead of the brief's. A prompt change only.
+  - Mixed audiences: translate the final draft once per language (never per user: one
+    extra call per campaign, and every text sent is one the marketer approved). The
+    messages answer reports its language; if the segment has recipients of the other
+    language, the template is translated as its own step with the same schema,
+    validator and repair loop, and each recipient gets the variant matching
+    `users.language` at enqueue.
+  - Needs: per-language content storage (`campaign_contents (campaign_id, language,
+    sms, email_subject, email_body)` instead of the content columns on `campaigns`),
+    TR/EN tabs in the approval UI with both variants editable, and a staleness rule: if
+    the source text is edited after translation, the translation is marked outdated and
+    approval is blocked until it is translated again. Translation therefore runs right
+    before approval, once the source draft is final.

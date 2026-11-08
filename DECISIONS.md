@@ -24,6 +24,31 @@ Claude and the mock.
 - **Trade-off:** typed results appear one layer up (the validator) instead of at the
   client boundary.
 
+### Default model: Claude Sonnet 5.5
+
+Chosen by running six briefs through Sonnet 5.5 and Opus 5.5 with the same prompts
+(`make llm-try`, default efforts `low` for audience and `medium` for messages): the
+example brief in Turkish and English, a city that isn't in the data (Paris), criteria
+the DSL can't express (age, gender), several cities plus a language, and a brief packed
+with offers to push the SMS length.
+
+| | Sonnet 5.5 | Opus 5.5 |
+|---|---|---|
+| Valid on first answer | 5/5, no repairs | 5/5, no repairs |
+| Paris brief | reported as unmappable | reported as unmappable |
+| Audience step latency | 1.2–1.7 s | 1.6–2.1 s |
+| Messages step latency | 2.8–4.8 s | 5.8–15.8 s |
+| Messages output tokens (avg) | ~370 | ~860 |
+| Cost of the six briefs | ~$0.05 | ~$0.16 |
+
+Segments and unsupported criteria were identical, and copy quality was comparable
+(Opus wrote longer emails). The marketer waits on screen, so Sonnet's 2–3x faster
+messages step decides it. The model is configuration (`ANTHROPIC_MODEL`), so switching
+back is a setting, not a code change.
+
+Limits of the evidence: six briefs, one run each, and the repair path never triggered
+against the real model (it is covered by mock tests).
+
 ### Structured outputs, not forced tool use
 
 Each step's JSON Schema is sent as `output_config.format`. The original plan was a tool
