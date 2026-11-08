@@ -281,6 +281,8 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
 | `POST /api/campaigns/{id}/audience` `{brief}` | new brief, audience step again; clears the draft |
 | `POST /api/campaigns/{id}/acknowledge` | acknowledges unsupported criteria |
 | `POST /api/campaigns/{id}/messages` `{feedback?}` | messages step as an SSE stream; `feedback` revises the stored draft |
+| `POST /api/campaigns/{id}/audience/refresh` | recounts the audience for today (no Claude call) |
+| `POST /api/campaigns/{id}/approve` `{content}` | validates the final content and queues the messages |
 | `GET /api/campaigns`, `GET /api/campaigns/{id}` | read |
 | `GET /healthz` | DB ping |
 
@@ -312,22 +314,51 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
   queued. The frontend applies the same rules only for instant feedback; the backend is the
   authority, since the API can be called directly.
 
+  Preconditions, each a `409`/`422` that changes nothing: the campaign is not approved
+  yet (`already_approved`), it has an audience, unsupported criteria are acknowledged,
+  and the audience was counted today (`stale_audience`, see below). A generated draft
+  is not required: the content is validated the same way whoever wrote it, and a draft
+  left invalid after repairs can be fixed by hand and approved from status `draft`.
+
   Personalization is rendered at enqueue time, for every actual recipient (not estimated),
   and the rendered text is stored in `messages.body` / `subject`. The row is then exactly
   what gets sent: auditable, deterministic even if user data changes later, and the worker
-  never needs to know about templates.
-  - Empty `first_name`: the name part is dropped with a neutral fallback
-    (`"Merhaba {{first_name}},"` → `"Merhaba,"`).
-  - Over the limit after rendering: before approval, a preview step reports how many
-    recipients exceed the limit (with examples). The marketer decides per campaign:
-    send them the name-less version (same fallback as an empty name — default) or skip them.
-    The choice is stored in `campaigns.over_limit_policy`; skipped recipients get a
-    `messages` row with status `skipped`, never silently dropped.
-  The "longest name in the segment" check at draft time stays as an early warning only.
-  The API then computes the final segment, applies the mandatory per-channel consent filter
-  (see Data — the same filter is used for the reach count shown in the audience step, so
-  preview and actual send counts match), then inserts one row per (user, channel) into the
-  `messages` table with status `pending`. This table IS the queue — no separate queue system.
+  never needs to know about templates. Rendering happens in Go (`content.RenderFor`),
+  inside the approve transaction: recipients are read, rendered, and written with one
+  `INSERT … SELECT FROM unnest(…) ON CONFLICT DO NOTHING`. Doing it in SQL would need a
+  second implementation of the empty-name rule that the Go tests don't cover.
+  - Empty `first_name`: the placeholder is removed and the line tidied: spaces collapsed,
+    no space before punctuation, and a line that started with the name loses the
+    punctuation after it and is capitalized with Turkish rules (`i` → `İ`):
+    `"Merhaba {{first_name}}, sepetin…"` → `"Merhaba, sepetin…"`,
+    `"{{first_name}}, sepetindekiler…"` → `"Sepetindekiler…"`. Weak spot, accepted:
+    `"Sevgili {{first_name}}!"` → `"Sevgili!"`.
+  - Over the limit: can't happen for valid content, because the validator measures every
+    `{{first_name}}` as the longest name in the audience and that is a hard rule. The
+    price: one long name lowers everyone's SMS budget (15 characters in the seed). At
+    enqueue each recipient is still checked as a safety net for data that changed after
+    the count; a field over its limit gets the version without the name (SMS; for email
+    only the subject, the body has no limit). There is no preview screen and no
+    fallback/skip choice; `over_limit_policy` stays at its default `fallback`.
+  - Language: messages are written in Turkish for now, whatever the brief's language. The
+    language is an explicit value (prompt target, `campaigns.content_language`, render
+    capitalization), not "the brief's language", so per-recipient language variants can
+    be added later without changing the flow (see Later).
+  The API then computes the final segment at the stored `as_of`, applies the mandatory
+  per-channel consent filter (see Data — the same filter is used for the reach count shown
+  in the audience step, so preview and actual send counts match), then inserts one row per
+  (user, channel) into the `messages` table with status `pending`. This table IS the
+  queue — no separate queue system. If nobody is reachable any more (consent withdrawn
+  since the count), approval is rejected with `422 empty_audience` and nothing changes.
+  The response is the campaign plus a summary: messages queued per channel and how many
+  recipients got the version without their name.
+
+  Stale audience: the day window is pinned to `as_of`. If `as_of` is on an earlier
+  (Istanbul) day than the approval, approval returns `409 stale_audience`;
+  `POST /api/campaigns/{id}/audience/refresh` recounts the stored segment for today
+  without calling Claude, keeps the draft and the acknowledgement, and re-validates the
+  draft in case the longest name grew (an invalid draft goes back to `draft` with its
+  errors).
 
   Approve is idempotent through a conditional state transition, all in one transaction:
   ```sql
@@ -462,10 +493,9 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
   are out of scope for now; the core flow comes first.
 
 ## Later
-- Message language. Today the messages are written in the brief's language. That breaks
-  when the segment targets the other language: a Turkish brief for users whose
-  `users.language` is `en` produces Turkish messages for English-preferring users (seen
-  in the model comparison). Planned, in two parts:
+- Message language. Today the messages are always written in Turkish (an explicit
+  `content_language`, see Sending). English-preferring users (`users.language = en`)
+  therefore get Turkish messages. Planned, in two parts:
   - Single-language segments (`language eq en` / `eq tr`): tell the messages prompt to
     write in that language instead of the brief's. A prompt change only.
   - Mixed audiences: translate the final draft once per language (never per user: one

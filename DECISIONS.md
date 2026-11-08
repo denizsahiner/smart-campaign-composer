@@ -165,6 +165,52 @@ the variable in other syntaxes (`%first_name%`, `[FirstName]`) are rejected too.
 
 ## Sending
 
+### Over-limit recipients: prevented, not previewed
+
+The architecture draft planned a preview before approval listing recipients whose
+rendered message exceeds the limit, with a per-campaign choice to send them the version
+without the name or skip them. The content validator already measures every
+`{{first_name}}` as the longest name in the audience and enforces it as a hard rule, so
+for valid content nobody can exceed the limit and that preview would never show anyone.
+The hard rule stays and the preview and choice were dropped. The cost is a tighter
+budget for everyone when one name is long. A per-recipient check at enqueue remains as a
+safety net for data that changed after the count: an SMS or email subject over its limit
+gets the version without the name (the email body keeps it).
+
+### Empty first name: remove the placeholder and tidy the line
+
+`"Merhaba {{first_name}}, sepetin…"` → `"Merhaba, sepetin…"`, and a line that started
+with the name is capitalized (`"{{first_name}}, sepetindekiler…"` → `"Sepetindekiler…"`).
+Chosen over a neutral word ("değerli müşterimiz"), which reads artificially and makes the
+text longer, and over asking Claude for a second, name-less variant of every field, which
+doubles the schema, validation and approval UI. Weak spot, accepted:
+`"Sevgili {{first_name}}!"` → `"Sevgili!"`.
+
+### Messages are Turkish for now; the language is an explicit parameter
+
+The prompt names the target language instead of "write in the brief's language", the
+campaign stores `content_language`, and rendering capitalizes by it. Only `tr` is used
+today. Per-recipient language later means a translated variant per language with the
+same mechanism, not a change to the flow.
+
+### Rendering at enqueue happens in Go
+
+The draft planned a single `INSERT … SELECT`. The empty-name rule (capitalization,
+punctuation) would need a second implementation in SQL that the Go tests don't cover, so
+recipients are read, rendered by `content.RenderFor` and inserted in one statement, all
+inside the approve transaction.
+
+### Approval rules
+
+- A stale audience (counted on an earlier day) must be refreshed first; refresh recounts
+  without calling Claude and keeps the draft.
+- Hand-written content can be approved without a generated draft, and an invalid draft
+  fixed by hand can be approved from status `draft`; the same validator decides.
+- If nobody is reachable at approval time, approval is rejected (`422`) rather than
+  creating an approved campaign with no messages.
+- The response reports messages queued per channel and how many recipients got the
+  version without their name.
+
 ### Mock provider: synchronous, with configurable failures
 
 The mock SMS/email provider answers each request immediately (sent or an error) and has
