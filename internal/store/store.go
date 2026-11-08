@@ -44,15 +44,16 @@ type Audience struct {
 }
 
 type Campaign struct {
-	ID            int64
-	Brief         string
-	Status        string
-	Audience      *Audience // nil until the audience step succeeded
-	Content       *content.Content
-	ContentErrors []validation.FieldError // errors of the stored draft; nil when valid
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	ApprovedAt    *time.Time
+	ID              int64
+	Brief           string
+	Status          string
+	Audience        *Audience // nil until the audience step succeeded
+	Content         *content.Content
+	ContentLanguage string                  // "tr" for now; see prompt.DefaultLanguage
+	ContentErrors   []validation.FieldError // errors of the stored draft; nil when valid
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	ApprovedAt      *time.Time
 }
 
 // NeedsAcknowledgement reports whether unsupported criteria still block the messages step.
@@ -73,7 +74,7 @@ func (s *Store) Create(ctx context.Context, brief string) (int64, error) {
 const campaignColumns = `id, brief, status, segment_rule, audience_as_of, audience_total_count,
 	sms_audience_count, email_audience_count, longest_first_name, unsupported_criteria,
 	unsupported_acknowledged_at, sms_content, email_subject, email_body, content_errors,
-	created_at, updated_at, approved_at`
+	content_language, created_at, updated_at, approved_at`
 
 func scanCampaign(row pgx.Row) (Campaign, error) {
 	var (
@@ -86,7 +87,7 @@ func scanCampaign(row pgx.Row) (Campaign, error) {
 		contentErrs                []validation.FieldError
 	)
 	err := row.Scan(&c.ID, &c.Brief, &c.Status, &seg, &asOf, &total, &sms, &email, &longest,
-		&unsupported, &ackAt, &sMS, &subject, &body, &contentErrs, &c.CreatedAt, &c.UpdatedAt, &c.ApprovedAt)
+		&unsupported, &ackAt, &sMS, &subject, &body, &contentErrs, &c.ContentLanguage, &c.CreatedAt, &c.UpdatedAt, &c.ApprovedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Campaign{}, ErrNotFound
 	}
@@ -177,9 +178,9 @@ func (s *Store) AcknowledgeUnsupported(ctx context.Context, id int64) error {
 	return s.editResult(ctx, id, tag.RowsAffected(), err)
 }
 
-// SetContent stores a draft. With no errors the campaign becomes ready (approvable);
+// SetContent stores a draft written in lang. With no errors the campaign becomes ready;
 // with errors it stays a draft and the errors are kept for the UI.
-func (s *Store) SetContent(ctx context.Context, id int64, c content.Content, errs []validation.FieldError) error {
+func (s *Store) SetContent(ctx context.Context, id int64, c content.Content, lang string, errs []validation.FieldError) error {
 	// An untyped nil is sent as SQL NULL; a nil slice would be stored as JSON null.
 	status := StatusReady
 	var errsArg any
@@ -188,9 +189,30 @@ func (s *Store) SetContent(ctx context.Context, id int64, c content.Content, err
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE campaigns SET sms_content = $2, email_subject = $3, email_body = $4,
-			content_errors = $5, status = $6, updated_at = now()
+			content_errors = $5, status = $6, content_language = $7, updated_at = now()
 		WHERE id = $1 AND status IN ('draft', 'ready') AND segment_rule IS NOT NULL`,
-		id, c.SMS, c.EmailSubject, c.EmailBody, errsArg, status)
+		id, c.SMS, c.EmailSubject, c.EmailBody, errsArg, status, lang)
+	return s.editResult(ctx, id, tag.RowsAffected(), err)
+}
+
+// RefreshAudience recounts an unchanged segment for a new reference time. The draft and
+// the acknowledgement are kept; contentErrs is the stored draft re-validated against the
+// new longest name (nil when valid or when there is no draft), which decides between
+// ready and draft.
+func (s *Store) RefreshAudience(ctx context.Context, id int64, counts segment.Counts, asOf time.Time, contentErrs []validation.FieldError) error {
+	var errsArg any
+	if len(contentErrs) > 0 {
+		errsArg = contentErrs
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE campaigns SET
+			audience_as_of = $2, audience_total_count = $3, sms_audience_count = $4,
+			email_audience_count = $5, longest_first_name = $6,
+			content_errors = CASE WHEN sms_content IS NULL THEN NULL ELSE $7::jsonb END,
+			status = CASE WHEN sms_content IS NOT NULL AND $7::jsonb IS NULL THEN 'ready' ELSE 'draft' END,
+			updated_at = now()
+		WHERE id = $1 AND status IN ('draft', 'ready') AND segment_rule IS NOT NULL`,
+		id, asOf, counts.Total, counts.SMS, counts.Email, counts.LongestFirstName, errsArg)
 	return s.editResult(ctx, id, tag.RowsAffected(), err)
 }
 

@@ -28,8 +28,8 @@ func TestMockFixtureByBrief(t *testing.T) {
 		t.Fatalf("TR messages = %s, %v", res.Raw, err)
 	}
 	res, err = m.Generate(ctx, userReq(StepMessages, ExampleBriefEN))
-	if err != nil || !strings.Contains(string(res.Raw), "Hi {{first_name}}") {
-		t.Fatalf("EN messages = %s, %v", res.Raw, err)
+	if err != nil || !strings.Contains(string(res.Raw), "sepetin seni bekliyor") {
+		t.Fatalf("EN brief messages = %s, %v", res.Raw, err)
 	}
 	res, err = m.Generate(ctx, userReq(StepAudience, "something else entirely"))
 	if err != nil || string(res.Raw) != defaultFixture.Audience {

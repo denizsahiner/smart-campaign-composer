@@ -8,7 +8,8 @@ type Fixture struct {
 }
 
 // ExampleBriefTR and ExampleBriefEN are the case's example brief (original Turkish and
-// its translation). Both map to the same segment; content follows the brief's language.
+// its translation). Both map to the same segment; messages are written in Turkish for
+// both, as the prompt asks.
 const (
 	ExampleBriefTR = "Son 30 gün içinde sepetine ürün ekleyip satın alma yapmayan İstanbul'daki kullanıcılara %30 indirim hatırlatması gönder. Samimi ama kısa olsun."
 	ExampleBriefEN = "Send a 30% discount reminder to users in Istanbul who added items to their cart in the last 30 days but did not make a purchase. Keep it friendly but short."
@@ -33,9 +34,9 @@ var fixtures = []Fixture{
 	{
 		Brief:    ExampleBriefEN,
 		Audience: exampleAudience,
-		Messages: `{"sms":"Hi {{first_name}}, your cart is waiting! Complete your order today and get 30% off.",` +
-			`"email_subject":"{{first_name}}, your cart is 30% off today",` +
-			`"email_body":"Hi {{first_name}},\n\nYou left a few things in your cart. Finish your order today and get 30% off.\n\nHappy shopping!"}`,
+		Messages: `{"sms":"Merhaba {{first_name}}, sepetin seni bekliyor! Bugün tamamlarsan %30 indirim senin.",` +
+			`"email_subject":"{{first_name}}, sepetin bugün %30 indirimli",` +
+			`"email_body":"Merhaba {{first_name}},\n\nSepetinde birkaç ürün unuttun. Siparişini bugün tamamla, %30 indirim kazan.\n\nKeyifli alışverişler!"}`,
 	},
 }
 

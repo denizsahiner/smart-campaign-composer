@@ -69,7 +69,8 @@ func (s *Server) generateMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.unlock(c.ID)
 
-	in := prompt.MessagesInput{Brief: c.Brief, Segment: seg, LongestFirstName: c.Audience.Counts.LongestFirstName}
+	in := prompt.MessagesInput{Brief: c.Brief, Segment: seg, LongestFirstName: c.Audience.Counts.LongestFirstName,
+		Language: prompt.DefaultLanguage}
 	if req.Feedback != "" {
 		in.Previous, in.Feedback = c.Content, req.Feedback
 	}
@@ -88,7 +89,7 @@ func (s *Server) generateMessages(w http.ResponseWriter, r *http.Request) {
 	if err != nil || final == nil {
 		return // cancelled, or an error event has been sent
 	}
-	if err := s.store.SetContent(r.Context(), c.ID, res.Content, res.Errors); err != nil {
+	if err := s.store.SetContent(r.Context(), c.ID, res.Content, in.Language, res.Errors); err != nil {
 		slog.Error("store draft", "campaign_id", c.ID, "err", err)
 		sse.send(compose.Event{Type: compose.EventError, Message: "The draft couldn't be saved. Please try again."})
 		return

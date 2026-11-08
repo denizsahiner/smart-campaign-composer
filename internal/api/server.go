@@ -49,6 +49,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/campaigns/{id}/audience", s.rerunAudience)
 	mux.HandleFunc("POST /api/campaigns/{id}/acknowledge", s.acknowledge)
 	mux.HandleFunc("POST /api/campaigns/{id}/messages", s.generateMessages)
+	mux.HandleFunc("POST /api/campaigns/{id}/audience/refresh", s.refreshAudience)
+	mux.HandleFunc("POST /api/campaigns/{id}/approve", s.approve)
 	return logRequests(mux)
 }
 

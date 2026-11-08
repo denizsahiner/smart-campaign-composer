@@ -195,7 +195,7 @@ func TestMessagesRequest(t *testing.T) {
 	if req.Step != llm.StepMessages || string(req.Schema) != string(MessagesSchema()) {
 		t.Fatalf("step/schema wrong")
 	}
-	for _, want := range []string{"Hard limit 160 characters", "Hard limit 80 characters"} {
+	for _, want := range []string{"Hard limit 160 characters", "Hard limit 80 characters", "Write the messages in Turkish, whatever language"} {
 		if !strings.Contains(req.System, want) {
 			t.Errorf("system prompt missing %q", want)
 		}
