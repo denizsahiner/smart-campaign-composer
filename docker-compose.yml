@@ -48,5 +48,48 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Mock SMS/email provider. Failure rates and limits come from .env (PROVIDER_*);
+  # the defaults inject 5xx, throttling, timeouts and latency on every run.
+  mock-provider:
+    build: .
+    command: ["mock-provider"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PROVIDER_ADDR: ":8090"
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck", "http://localhost:8090/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["worker"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgres://composer:composer@postgres:5432/composer?sslmode=disable
+      PROVIDER_URL: http://mock-provider:8090
+      WORKER_HEALTH_ADDR: ":8081"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-provider:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app", "healthcheck", "http://localhost:8081/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 10
+    # Lets in-flight sends finish on shutdown (HTTP timeout 3s + result write).
+    stop_grace_period: 15s
+    restart: unless-stopped
+
 volumes:
   pgdata:

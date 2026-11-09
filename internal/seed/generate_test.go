@@ -69,7 +69,7 @@ func TestExampleBriefReach(t *testing.T) {
 func TestEdgeCases(t *testing.T) {
 	users, events := Generate(Options{Users: 50, Seed: 42, Now: testNow})
 	byName := map[string]User{}
-	for _, u := range users[:9] {
+	for _, u := range users[:11] {
 		byName[u.FirstName+" "+u.LastName] = u
 	}
 	matched := abandonedCarts(users, events, "İstanbul", 30)
@@ -88,6 +88,8 @@ func TestEdgeCases(t *testing.T) {
 		{"Ceren Polat", true, func(u User) bool { return u.SMSConsent && u.Phone == nil }},
 		{"Berk Koç", true, func(u User) bool { return u.EmailConsent && u.Email == nil }},
 		{"Nazlı Şen", true, func(u User) bool { return !u.SMSConsent && !u.EmailConsent }},
+		{"Emre Çetin", true, func(u User) bool { return u.SMSConsent && *u.Phone == "+902125550123" }},
+		{"Gizem Arslan", true, func(u User) bool { return u.EmailConsent && *u.Email == "gizem.arslan@bounce.invalid" }},
 	}
 	for _, c := range cases {
 		u, ok := byName[c.name]

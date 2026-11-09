@@ -360,11 +360,6 @@ func TestAudienceExhausted(t *testing.T) {
 }
 
 func TestBackoffJitter(t *testing.T) {
-	for range 1000 {
-		if d := equalJitter(4 * time.Second); d < 2*time.Second || d > 4*time.Second {
-			t.Fatalf("jitter %v outside [2s, 4s]", d)
-		}
-	}
 	c := New(llm.NewMock(), nil, DefaultPolicy())
 	c.jitter = func(d time.Duration) time.Duration { return d }
 	if got := []time.Duration{c.backoff(1), c.backoff(2), c.backoff(3)}; !slices.Equal(got, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}) {

@@ -16,9 +16,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"time"
 
+	"github.com/denizsahiner/smart-campaign-composer/internal/backoff"
 	"github.com/denizsahiner/smart-campaign-composer/internal/llm"
 	"github.com/denizsahiner/smart-campaign-composer/internal/prompt"
 	"github.com/denizsahiner/smart-campaign-composer/internal/validation"
@@ -89,7 +89,7 @@ type Composer struct {
 func New(client llm.Client, recorder Recorder, policy Policy) *Composer {
 	return &Composer{
 		llm: client, recorder: recorder, policy: policy,
-		sleep: sleepCtx, jitter: equalJitter, now: time.Now,
+		sleep: sleepCtx, jitter: backoff.EqualJitter, now: time.Now,
 	}
 }
 
@@ -185,13 +185,6 @@ func (c *Composer) backoff(n int) time.Duration {
 
 // equalJitter waits between d/2 and d, so concurrent retries spread out but never come
 // back much sooner than intended.
-func equalJitter(d time.Duration) time.Duration {
-	if d <= 0 {
-		return 0
-	}
-	return d/2 + rand.N(d/2+1)
-}
-
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()

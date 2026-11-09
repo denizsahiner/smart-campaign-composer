@@ -196,6 +196,19 @@ func (g *generator) addEdgeCases() {
 	u.SMSConsent, u.EmailConsent = false, false
 	g.add(u)
 	g.event(u.ID, EventCartAdd, g.ago(7))
+
+	// Recipients the mock provider rejects with a permanent 400, so the "failed without
+	// retry" path shows up in every demo. A landline is not a Turkish mobile number.
+	u = g.newUser("Emre", "Çetin", city)
+	u.Phone = ptr("+902125550123")
+	g.add(u)
+	g.event(u.ID, EventCartAdd, g.ago(6))
+
+	// .invalid is reserved (RFC 2606) and can never be a real domain.
+	u = g.newUser("Gizem", "Arslan", city)
+	u.Email = ptr("gizem.arslan@bounce.invalid")
+	g.add(u)
+	g.event(u.ID, EventCartAdd, g.ago(6))
 }
 
 // email builds a unique, ASCII address on example.com (RFC 2606: never a real mailbox).

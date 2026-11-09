@@ -25,7 +25,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: app migrate | api | healthcheck | llm-try \"<brief>\"")
+		fmt.Fprintln(os.Stderr, "usage: app migrate | api | worker | mock-provider | healthcheck [url] | llm-try \"<brief>\"")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -37,8 +37,12 @@ func main() {
 		err = runMigrate(ctx)
 	case "api":
 		err = runAPI(ctx)
+	case "worker":
+		err = runWorker(ctx)
+	case "mock-provider":
+		err = runProvider(ctx)
 	case "healthcheck":
-		err = runHealthcheck()
+		err = runHealthcheck(os.Args[2:])
 	case "llm-try":
 		err = runLLMTry(ctx, os.Args[2:])
 	default:

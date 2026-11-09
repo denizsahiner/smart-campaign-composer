@@ -18,12 +18,7 @@ import (
 	"github.com/denizsahiner/smart-campaign-composer/internal/store"
 )
 
-func listenAddr() string {
-	if p := os.Getenv("PORT"); p != "" {
-		return ":" + p
-	}
-	return ":8080"
-}
+func listenAddr() string { return envString("API_ADDR", ":8080") }
 
 // runAPI serves the HTTP API until ctx is cancelled (SIGTERM), then drains open requests.
 func runAPI(ctx context.Context) error {
@@ -69,10 +64,15 @@ func runAPI(ctx context.Context) error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-// runHealthcheck is the container healthcheck: the runtime image has no curl.
-func runHealthcheck() error {
+// runHealthcheck is the container healthcheck: the runtime image has no curl. Without an
+// argument it checks the API; the worker and the mock provider pass their own URL.
+func runHealthcheck(args []string) error {
+	url := "http://localhost" + listenAddr() + "/healthz"
+	if len(args) > 0 {
+		url = args[0]
+	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("http://localhost" + listenAddr() + "/healthz")
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}
