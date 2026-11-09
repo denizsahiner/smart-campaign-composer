@@ -1,7 +1,14 @@
-.PHONY: test up down llm-try
+.PHONY: test test-go test-web up down llm-try
 
-test:
+test: test-go test-web
+
+test-go:
 	go test ./...
+
+# Frontend tests (Vitest, jsdom): no browser or running API needed. Installs the
+# locked dependencies on first run.
+test-web:
+	cd web && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm test
 
 up:
 	docker compose up --build
