@@ -26,6 +26,8 @@ type Server struct {
 	validator *segment.Validator
 	now       func() time.Time
 
+	monitoring Monitoring
+
 	// busy holds campaigns with an LLM step in progress, so a double click or a second
 	// tab can't run two generations (or a generation and an audience change) at once.
 	// In memory: the API runs as a single replica.
@@ -36,7 +38,7 @@ type Server struct {
 func NewServer(pool *pgxpool.Pool, composer *compose.Composer, validator *segment.Validator) *Server {
 	return &Server{
 		pool: pool, store: store.New(pool), composer: composer, validator: validator,
-		now: time.Now, busy: map[int64]bool{},
+		now: time.Now, busy: map[int64]bool{}, monitoring: DefaultMonitoring(),
 	}
 }
 
@@ -51,6 +53,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/campaigns/{id}/messages", s.generateMessages)
 	mux.HandleFunc("POST /api/campaigns/{id}/audience/refresh", s.refreshAudience)
 	mux.HandleFunc("POST /api/campaigns/{id}/approve", s.approve)
+	mux.HandleFunc("GET /api/campaigns/{id}/events", s.campaignEvents)
+	mux.HandleFunc("GET /api/metrics", s.metrics)
 	return logRequests(mux)
 }
 

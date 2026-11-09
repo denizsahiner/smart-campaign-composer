@@ -391,8 +391,14 @@ func (s *Server) deliver(channel string, req SendRequest) Delivery {
 	return *d
 }
 
+// deliveries serves GET /deliveries; ?summary=1 leaves out the list, for frequent polling.
 func (s *Server) deliveries(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.Snapshot())
+	snap := s.Snapshot()
+	if r.URL.Query().Get("summary") == "1" {
+		writeJSON(w, http.StatusOK, map[string]any{"totals": snap.Totals})
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // Snapshot returns the totals and every delivery, in delivery order.

@@ -42,9 +42,13 @@ func runAPI(ctx context.Context) error {
 		return err
 	}
 	composer := compose.New(client, store.New(pool), compose.DefaultPolicy())
+	monitoring := api.DefaultMonitoring()
+	monitoring.WorkerHealthURL = os.Getenv("WORKER_HEALTH_URL")
+	monitoring.ProviderURL = os.Getenv("PROVIDER_URL")
 	srv := &http.Server{
-		Addr:              listenAddr(),
-		Handler:           api.NewServer(pool, composer, segment.NewValidator(cities)).Handler(),
+		Addr: listenAddr(),
+		Handler: api.NewServer(pool, composer, segment.NewValidator(cities)).
+			WithMonitoring(monitoring).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: message generation is a long-lived SSE response.
 	}

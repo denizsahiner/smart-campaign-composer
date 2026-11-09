@@ -30,10 +30,11 @@ const (
 var tooLongMessages = `{"sms":"Merhaba {{first_name}}, ` + strings.Repeat("çok uzun mesaj var ", 8) + `","email_subject":"Konu","email_body":"Gövde"}`
 
 type env struct {
-	t    *testing.T
-	srv  *httptest.Server
-	pool *pgxpool.Pool
-	mock *llm.Mock
+	t      *testing.T
+	srv    *httptest.Server
+	server *api.Server
+	pool   *pgxpool.Pool
+	mock   *llm.Mock
 }
 
 // newEnv starts the API on a seeded database. With no replies the mock answers from its
@@ -52,9 +53,12 @@ func newEnv(t *testing.T, replies ...llm.Scripted) *env {
 	policy := compose.DefaultPolicy()
 	policy.BaseBackoff = time.Millisecond
 	composer := compose.New(mock, store.New(pool), policy)
-	srv := httptest.NewServer(api.NewServer(pool, composer, segment.NewValidator(cities)).Handler())
+	monitoring := api.DefaultMonitoring()
+	monitoring.PollInterval = 20 * time.Millisecond
+	server := api.NewServer(pool, composer, segment.NewValidator(cities)).WithMonitoring(monitoring)
+	srv := httptest.NewServer(server.Handler())
 	t.Cleanup(srv.Close)
-	return &env{t: t, srv: srv, pool: pool, mock: mock}
+	return &env{t: t, srv: srv, server: server, pool: pool, mock: mock}
 }
 
 func (e *env) do(method, path string, body any) (int, map[string]any) {

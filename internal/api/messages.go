@@ -113,6 +113,23 @@ func newSSE(w http.ResponseWriter) *sseWriter {
 	return s
 }
 
+// event writes a named event with v as its JSON data.
+func (s *sseWriter) event(name string, v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		name, data = "error", []byte(`{"message":"internal error"}`)
+	}
+	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", name, data)
+	s.rc.Flush()
+}
+
+// comment writes an SSE comment line: ignored by clients, keeps idle proxies from
+// closing the stream.
+func (s *sseWriter) comment(text string) {
+	fmt.Fprintf(s.w, ": %s\n\n", text)
+	s.rc.Flush()
+}
+
 // send writes one event; the event name is the type, the data its JSON.
 func (s *sseWriter) send(e compose.Event) {
 	data, err := json.Marshal(e)
