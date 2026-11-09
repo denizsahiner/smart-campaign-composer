@@ -7,7 +7,7 @@
 - Real-time updates to the frontend: SSE
 
 ## Services
-- Containers run in docker compose: postgres, api, worker, mock-provider, frontend
+- Containers run in docker compose: postgres, migrate, api, worker, mock-provider
 - One Go binary, three long-running entrypoints (`./app api`, `./app worker`,
   `./app mock-provider`), each its own container. Shares the same models, LLMClient, and
   validation code. Kept as one binary to avoid duplicating that code; run as separate
@@ -20,8 +20,9 @@
   (`depends_on: migrate: service_completed_successfully`). Kept separate from API startup so
   API restarts don't re-run migrations and responsibilities stay clear. `worker` also
   waits for `mock-provider: service_healthy`.
-- `frontend`: the Vue app is built and served by nginx, which proxies `/api` to the API
-  (no CORS setup needed).
+- Frontend: the Vue app is built in a Node stage of the Dockerfile and served by the API
+  itself (`WEB_DIR`), on the same origin as `/api` (no CORS setup needed). In development
+  Vite serves it and proxies `/api` and `/healthz`. See DECISIONS.md.
 - Graceful shutdown: on SIGTERM the worker stops claiming, lets sends already on the wire
   finish (bounded by the HTTP timeout) and writes their results, hands claimed rows still
   waiting for the rate limiter back with their attempt refunded, and exits. A row whose
@@ -546,8 +547,8 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
   - Mock provider `GET /healthz`: `200`.
   - The runtime image has no shell or curl; compose healthchecks run
     `/app healthcheck <url>`.
-- Metrics: `GET /api/metrics` (under `/api` because nginx forwards only `/api` to the
-  API; `/healthz` stays at the root for Docker) returns plain JSON — no Prometheus:
+- Metrics: `GET /api/metrics` (under `/api`, next to the rest of the API that the
+  frontend calls; `/healthz` stays at the root for Docker) returns plain JSON — no Prometheus:
   ```json
   {
     "queue_depth": {"sms": 120, "email": 340},

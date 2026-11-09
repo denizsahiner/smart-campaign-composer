@@ -303,7 +303,7 @@ retries, so the difference is small, and one rule is easier to reason about.
 
 ### Metrics live under /api and survive a dependency being down
 
-The frontend's nginx forwards only `/api` to the API, so metrics are `GET /api/metrics`;
+Metrics are `GET /api/metrics`, next to the rest of the API the frontend calls;
 `/healthz` stays at the root, where Docker calls it. Besides the database numbers, the
 endpoint fetches the worker's health and the provider's totals live (1 s timeout each,
 in parallel). A dependency that doesn't answer is reported as `unreachable` inside a
@@ -319,3 +319,20 @@ event carries the final status rather than "approved, nothing left". The send ra
 averaged over the last 5 seconds: smooth enough to read, at the cost of trailing the real
 rate when sending starts and stops. Each connection polls on its own; sharing one query
 per campaign would only pay off with many viewers.
+
+## Frontend
+
+### The API serves the built frontend; no nginx
+
+The Dockerfile builds the Vue app in a Node stage and copies it into the runtime image;
+the API serves it when `WEB_DIR` is set, so `docker compose up` brings up the UI at
+`http://localhost:8080` with no extra container. The draft planned an nginx `frontend`
+service proxying `/api`; that buys a separate cache and TLS layer we don't need for a
+local demo, and costs another image, config file and hop for the long-lived SSE streams.
+On one origin there's no CORS and no proxy buffering to switch off. Paths that aren't
+files get `index.html` so client routes survive a reload, except under `/assets/`, where
+a stale bundle name must fail as a 404 rather than load HTML as a script; unknown `/api/`
+paths keep the JSON error shape. What we give up: the API process also serves static
+files, and a frontend change means rebuilding the API image. Without `WEB_DIR` the API
+serves only the API, as in development, where Vite serves the app and proxies `/api`
+and `/healthz`.
