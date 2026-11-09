@@ -34,6 +34,8 @@ services:
       # Read live for GET /api/metrics; the API still answers if either is down.
       WORKER_HEALTH_URL: http://worker:8081/healthz
       PROVIDER_URL: http://mock-provider:8090
+      # The built frontend (see the Dockerfile); open http://localhost:8080.
+      WEB_DIR: /web
     # ANTHROPIC_API_KEY, LLM_PROVIDER, ANTHROPIC_MODEL... Without a .env (or without a
     # key in it) the API runs on the mock LLM.
     env_file:

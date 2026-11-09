@@ -48,14 +48,14 @@ func runAPI(ctx context.Context) error {
 	srv := &http.Server{
 		Addr: listenAddr(),
 		Handler: api.NewServer(pool, composer, segment.NewValidator(cities)).
-			WithMonitoring(monitoring).Handler(),
+			WithMonitoring(monitoring).WithStatic(os.Getenv("WEB_DIR")).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: message generation is a long-lived SSE response.
 	}
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	slog.Info("api listening", "addr", srv.Addr, "llm", provider, "cities", len(cities))
+	slog.Info("api listening", "addr", srv.Addr, "llm", provider, "cities", len(cities), "web_dir", os.Getenv("WEB_DIR"))
 
 	select {
 	case err := <-errc:

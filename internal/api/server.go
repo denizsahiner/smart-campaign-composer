@@ -27,6 +27,7 @@ type Server struct {
 	now       func() time.Time
 
 	monitoring Monitoring
+	staticDir  string // the built frontend; empty = API only
 
 	// busy holds campaigns with an LLM step in progress, so a double click or a second
 	// tab can't run two generations (or a generation and an audience change) at once.
@@ -55,6 +56,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/campaigns/{id}/approve", s.approve)
 	mux.HandleFunc("GET /api/campaigns/{id}/events", s.campaignEvents)
 	mux.HandleFunc("GET /api/metrics", s.metrics)
+	if s.staticDir != "" {
+		// The least specific GET pattern: wrong methods on API routes still get 405.
+		mux.Handle("GET /", staticHandler(s.staticDir))
+	}
 	return logRequests(mux)
 }
 
