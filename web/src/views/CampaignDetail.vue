@@ -101,9 +101,11 @@
         {{ queued.without_name.sms }} SMS ve {{ queued.without_name.email }} e-posta isimsiz gider (kayıtlı ad yok).
       </span>
     </section>
-    <p v-else-if="c.status === 'approved' || c.status === 'completed'" class="section notice">
-      Onaylandı {{ c.approved_at ? new Date(c.approved_at).toLocaleString('tr-TR') : '' }}. Mesajlar gönderim için kuyrukta.
+    <p v-else-if="sending" class="section notice">
+      Onaylandı {{ c.approved_at ? new Date(c.approved_at).toLocaleString('tr-TR') : '' }}.
     </p>
+
+    <DeliveryProgress v-if="sending" :key="c.id" :campaign-id="c.id" @done="reload" />
   </div>
 </template>
 
@@ -113,6 +115,7 @@ import { api, generateMessages } from '../api'
 import BaseButton from '../components/BaseButton.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import ChannelCounter from '../components/ChannelCounter.vue'
+import DeliveryProgress from '../components/DeliveryProgress.vue'
 
 const props = defineProps({ id: String })
 const PLACEHOLDER = '{{first_name}}'
@@ -134,6 +137,7 @@ const queued = ref(null)
 let abort = null
 
 const editable = computed(() => c.value && (c.value.status === 'draft' || c.value.status === 'ready'))
+const sending = computed(() => c.value && (c.value.status === 'approved' || c.value.status === 'completed'))
 const needsAck = computed(() => {
   const a = c.value?.audience
   return !!a && a.unsupported_criteria.length > 0 && !a.unsupported_acknowledged
@@ -171,6 +175,11 @@ onMounted(async () => {
   try { apply(await api.get(props.id)) } catch (e) { loadError.value = e.message }
 })
 onBeforeUnmount(() => abort?.abort())
+
+// After delivery finishes the campaign is completed; reload so the status badge follows.
+async function reload() {
+  try { apply(await api.get(props.id)) } catch { /* the delivery panel already shows the final counts */ }
+}
 
 async function run(name, fn) {
   busy.value = name

@@ -27,6 +27,46 @@ export const api = {
   acknowledge: (id) => call('POST', `/api/campaigns/${id}/acknowledge`),
   refreshAudience: (id) => call('POST', `/api/campaigns/${id}/audience/refresh`),
   approve: (id, content) => call('POST', `/api/campaigns/${id}/approve`, { content }),
+  metrics: () => call('GET', '/api/metrics'),
+}
+
+// Health of the API and its database. Never throws: an unreachable API is a status too.
+// Returns {status: 'ok'|'unavailable'|'unreachable', db?}.
+export async function health() {
+  try {
+    const res = await fetch('/healthz')
+    const data = await res.json().catch(() => null)
+    if (res.ok) return { status: 'ok', db: data?.db }
+    return { status: 'unavailable', db: data?.db }
+  } catch {
+    return { status: 'unreachable' }
+  }
+}
+
+// Follows an approved campaign's delivery (GET /api/campaigns/{id}/events, SSE).
+// The server sends progress at once and on every change, then done and closes; a
+// server-side failure arrives as a named "error" event with {message}.
+// onError(message, retrying): retrying is true while the browser reconnects by itself.
+// Returns a function that stops watching.
+export function watchDelivery(id, { onProgress, onDone, onError }) {
+  const es = new EventSource(`/api/campaigns/${id}/events`)
+  es.addEventListener('progress', (e) => onProgress(JSON.parse(e.data)))
+  es.addEventListener('done', (e) => {
+    es.close()
+    onDone(JSON.parse(e.data))
+  })
+  es.addEventListener('error', (e) => {
+    if (e.data) {
+      // The server's own error event; it closes the stream after sending it.
+      es.close()
+      onError(JSON.parse(e.data).message, false)
+    } else {
+      // Connection-level error. CONNECTING means the browser is retrying on its own;
+      // CLOSED means it gave up (e.g. the API answered with a non-stream error).
+      onError(null, es.readyState === EventSource.CONNECTING)
+    }
+  })
+  return () => es.close()
 }
 
 // Streams the messages step (Server-Sent Events over POST). onEvent gets {type, ...}.
