@@ -289,7 +289,7 @@ make it appear in every demo and test.
 
 The worker opens a small `/healthz` that is healthy only if the DB answers and each
 channel loop ran in the last 10 seconds, so a stuck loop is caught, not just a dead
-process. The dashboard can't reach the worker, so the API's `/metrics` includes the
+process. The dashboard can't reach the worker, so the API's `/api/metrics` includes the
 worker's health.
 
 ### Equal jitter for every backoff
@@ -298,3 +298,24 @@ Backoffs wait between d/2 and d (equal jitter), for Claude calls and for sends a
 one helper. Full jitter (0 to d) spreads retries best but can retry almost immediately;
 a symmetric ±20% barely spreads them. The per-channel limiter already smooths a herd of
 retries, so the difference is small, and one rule is easier to reason about.
+
+## Monitoring
+
+### Metrics live under /api and survive a dependency being down
+
+The frontend's nginx forwards only `/api` to the API, so metrics are `GET /api/metrics`;
+`/healthz` stays at the root, where Docker calls it. Besides the database numbers, the
+endpoint fetches the worker's health and the provider's totals live (1 s timeout each,
+in parallel). A dependency that doesn't answer is reported as `unreachable` inside a
+`200`, rather than failing the whole response: the dashboard's job at that moment is to
+show which part is down.
+
+### The delivery stream ends on the campaign's status
+
+`GET /api/campaigns/{id}/events` sends the current counts on connect and then only when
+they change, plus a 15 s keep-alive comment. It ends with `done` when the worker marks the
+campaign `completed`, which happens exactly when no message is left open, so the final
+event carries the final status rather than "approved, nothing left". The send rate is
+averaged over the last 5 seconds: smooth enough to read, at the cost of trailing the real
+rate when sending starts and stops. Each connection polls on its own; sharing one query
+per campaign would only pay off with many viewers.

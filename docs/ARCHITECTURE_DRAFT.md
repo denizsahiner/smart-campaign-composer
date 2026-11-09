@@ -36,7 +36,8 @@ Environment variables, all with working defaults (`.env.example` lists them):
 | `DATABASE_URL` | set in compose | migrate, api, worker |
 | `API_ADDR` | `:8080` | api |
 | `ANTHROPIC_API_KEY`, `LLM_PROVIDER`, `ANTHROPIC_MODEL`, `LLM_EFFORT_AUDIENCE`, `LLM_EFFORT_MESSAGES`, `LLM_REFUSAL_FALLBACK` | see LLM | api |
-| `PROVIDER_URL` | `http://mock-provider:8090` | worker |
+| `PROVIDER_URL` | `http://mock-provider:8090` | worker; api (provider totals in metrics) |
+| `WORKER_HEALTH_URL` | `http://worker:8081/healthz` | api (worker health in metrics) |
 | `WORKER_HEALTH_ADDR` | `:8081` | worker |
 | `WORKER_RATE_PER_CHANNEL` | `100` | worker |
 | `WORKER_CONCURRENCY_PER_CHANNEL` | `32` | worker |
@@ -89,7 +90,7 @@ opened). The worker's 8081 stays inside the compose network.
 - LLM call log: `llm_calls` table, one row per Claude call: campaign_id, step
   ('audience' | 'messages'), prompt_version, raw_response, validation_errors (jsonb),
   repair_attempt, transport_attempt, input_tokens, output_tokens, latency_ms, created_at.
-  Feeds the LLM numbers in `/metrics`, makes failures debuggable, and gives concrete
+  Feeds the LLM numbers in `/api/metrics`, makes failures debuggable, and gives concrete
   evidence of how Claude's output was validated and repaired.
 - `campaigns` table:
   id, brief (text), segment_rule (jsonb), sms_content, email_subject, email_body,
@@ -322,7 +323,7 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
 | `POST /api/campaigns/{id}/approve` `{content}` | validates the final content and queues the messages |
 | `GET /api/campaigns`, `GET /api/campaigns/{id}` | read |
 | `GET /api/campaigns/{id}/events` | live delivery counts as an SSE stream (see Monitoring) |
-| `GET /metrics` | queue depth, message counts, LLM numbers, worker health (see Monitoring) |
+| `GET /api/metrics` | queue depth, message counts, LLM numbers, worker health, provider totals (see Monitoring) |
 | `GET /healthz` | DB ping |
 
 - The messages stream is a `POST` (it creates content), read by the frontend with
@@ -545,31 +546,61 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
   - Mock provider `GET /healthz`: `200`.
   - The runtime image has no shell or curl; compose healthchecks run
     `/app healthcheck <url>`.
-- Metrics: `GET /metrics` returns plain JSON computed from the DB — no Prometheus — plus
-  the worker's health, which the API fetches from the worker's `/healthz` (1 s timeout;
-  `unreachable` if it doesn't answer), so the dashboard can show it:
+- Metrics: `GET /api/metrics` (under `/api` because nginx forwards only `/api` to the
+  API; `/healthz` stays at the root for Docker) returns plain JSON — no Prometheus:
   ```json
   {
     "queue_depth": {"sms": 120, "email": 340},
-    "messages": {"sms": {"sent": 900, "failed": 3, "retry_scheduled": 12}, "email": {"...": 0}},
-    "llm": {"calls": 42, "validation_failures": 5},
-    "worker": {"status": "ok"}
+    "messages": {"sms": {"pending": 100, "sending": 8, "retry_scheduled": 12, "sent": 900,
+                         "failed": 3, "skipped": 0}, "email": {"...": 0}},
+    "llm": {"calls": 42, "validation_failures": 5, "errors": 1, "avg_latency_ms": 2012,
+            "input_tokens": 41000, "output_tokens": 9000},
+    "worker": {"status": "ok"},
+    "provider": {"status": "ok", "totals": {"sms": {"requests": 346, "deliveries": 328,
+                 "duplicates": 0, "hung_after_delivery": 0,
+                 "rejected": {"server_error": 17, "throttled": 1}}, "email": {"...": 0}}}
   }
   ```
+  - `queue_depth` is `pending` + `sending` + `retry_scheduled`; `messages` covers all
+    campaigns, every status present. Per-campaign numbers come from the event stream.
+  - `llm` is computed from `llm_calls`: `validation_failures` counts answers that failed
+    validation (repaired or not), `errors` calls with no usable answer.
+  - `worker` comes from the worker's `/healthz` (`WORKER_HEALTH_URL`), `provider` from the
+    provider's `GET /deliveries?summary=1` (`PROVIDER_URL`), fetched live in parallel with
+    a 1 s timeout each. A dependency that doesn't answer is reported as `unreachable` (an
+    unhealthy answer as `unavailable` with its reason) and the endpoint still answers
+    `200`, so the dashboard can show which part is down. The provider's totals live in its
+    memory and start from zero when it restarts.
   Simple to consume from the dashboard and needs no extra library or container.
 
 - How do worker status changes reach the frontend live?
   The API and worker are separate containers and don't talk directly; Postgres is the
-  shared source of truth. For each open SSE connection (`GET /api/campaigns/{id}/events`)
-  the API polls aggregated counts about once per second:
+  shared source of truth. `GET /api/campaigns/{id}/events` is an SSE stream (a `GET`, so
+  the frontend can use `EventSource`). For each open connection the API polls about once
+  per second:
   ```sql
-  SELECT channel, status, count(*) FROM messages WHERE campaign_id = $1 GROUP BY 1, 2;
+  SELECT channel, status, count(*),
+         count(*) FILTER (WHERE sent_at > now() - interval '5 seconds')
+  FROM messages WHERE campaign_id = $1 GROUP BY 1, 2;
   ```
-  and pushes an event to the client only when the counts changed. The stream closes once the
-  campaign has no `pending` / `sending` / `retry_scheduled` rows left.
+  Events:
+  - `event: progress`: sent at once on connect, then whenever the campaign status or a
+    count changed. Data: `campaign_id`, `status`, `channels` (count per status, every
+    status present), `total` per channel, and `rate_per_second` per channel (sends in the
+    last 5 s / 5; a smoothed rate, so it trails the real rate at the start and end).
+  - `event: done`: once the worker has marked the campaign `completed` (no message left
+    `pending` / `sending` / `retry_scheduled`), with the final counts; then the stream
+    closes. A campaign that is already completed gets one `progress` and `done`, so past
+    campaigns can be opened too.
+  - `: ping` comment every 15 s, so idle proxies don't close the connection.
+  - `event: error` if the counts can't be read; the stream closes and the client
+    reconnects.
+  A campaign that isn't approved yet gets `409 not_approved` (nothing is being sent).
   Chosen over `LISTEN/NOTIFY`: no extra connection management or reconnect logic, and a
   ~1s delay is fine for a dashboard. The aggregate query uses the index on
-  `messages (campaign_id, channel, status)`.
+  `messages (campaign_id, channel, status)`. Each open connection runs its own query
+  every second; several viewers of the same campaign could share one, but with a single
+  marketer that is complexity without benefit (accepted limitation).
 
 ## Testing
 `make test` needs only Docker; no API key, no running compose stack.
@@ -650,7 +681,8 @@ immediately; no delivery webhooks.
 - Latency: uniform between `PROVIDER_LATENCY_MIN_MS` and `PROVIDER_LATENCY_MAX_MS`
   (50–300 ms).
 - `PROVIDER_SEED` fixes the random source for tests; empty means random.
-- `GET /deliveries`: totals per channel (requests, deliveries, duplicates answered,
+- `GET /deliveries` (`?summary=1` for the totals only, which is what the API's metrics
+  poll): totals per channel (requests, deliveries, duplicates answered,
   rejections by reason) and the list of delivered messages (`message_id`, channel, `to`,
   `provider_message_id`, `delivered_at`, `requests` = how many times that id was
   requested). Proof that retries didn't turn into duplicate sends.
