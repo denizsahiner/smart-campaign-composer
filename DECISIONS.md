@@ -214,8 +214,87 @@ inside the approve transaction.
 ### Mock provider: synchronous, with configurable failures
 
 The mock SMS/email provider answers each request immediately (sent or an error) and has
-no delivery webhooks. Its failure rates (5xx, 429 with `Retry-After`, timeouts, latency)
-are configurable, with non-zero defaults so every run exercises retries and rate
+no delivery webhooks. Its failures (5xx, throttling with `Retry-After`, timeouts,
+latency) are configurable, with non-zero defaults so every run exercises retries and rate
 limiting; it enforces its own 100/s per channel and deduplicates by `message_id`. A
 delivered/failed webhook would be more realistic but adds an endpoint and states without
 changing what the case asks us to show: retries, rate limiting and no duplicates.
+`GET /deliveries` lists what was actually delivered and how often each id was requested,
+which is the evidence that retries didn't become duplicate sends.
+
+### Throttling comes in windows, and every 429 gets the same reaction
+
+The first plan was a 5% chance of 429 on each request. At 100 msg/s that is about five
+429s a second; `Retry-After` is at least one second and pauses the channel, so the
+channel would hardly ever send. Treating injected 429s differently from rate-limit 429s
+would hide the problem instead of fixing it: a real client can't tell why it was
+throttled. So the provider throttles in episodes (on average every 30 s, for 2 s, per
+channel), like real providers under load, and the worker handles every 429 the same way:
+reschedule the message at `Retry-After`, pause the channel, don't count the attempt.
+
+### The same rate-limit algorithm on both sides
+
+Worker and provider both use a 100/s token bucket per channel: burst 1 on the worker,
+burst 10 on the provider, counted when the request arrives. With a fixed one-second
+window on the provider, a client keeping 100/s would still see 429s (a full bucket at
+start, 101 requests landing in one window, latency bunching arrivals). A client that keeps
+the rule now never hits the provider's limit; tests lower the provider's limit to
+exercise that path.
+
+### What counts as an attempt
+
+At most 5 attempts per message. A 429 or a refused connection does not count: neither
+says anything about the message, and a refused connection means it certainly wasn't
+sent. Without this, a 20-second provider outage would exhaust every message's attempts
+and fail the whole campaign. 5xx, timeouts and `409 in_progress` count, because the
+request may have reached the provider. The attempt is counted at claim and refunded,
+rather than counted when the result is written, so a message that crashes the worker
+still runs out of attempts. Accepted consequence: a message can stay `retry_scheduled`
+for as long as the provider throttles or is down.
+
+### One claim loop per channel, fenced result writes
+
+Each channel has its own claim query, goroutine pool and limiter, and claims only as
+many rows as it has free slots. A shared claim mixed channels in one batch, so one
+channel's pause or backlog held the other's rows. Results are written with
+`WHERE status = 'sending' AND attempts = <attempt at claim>`, so a result arriving after
+the lease expired and the row was claimed again is dropped instead of overwriting the
+newer outcome. A paused channel hands its claimed rows back rather than sleeping on them,
+so pauses never run into the lease.
+
+### Idempotency in the provider: only successes are remembered
+
+The provider marks a new `message_id` as in progress, keeps it as sent on success, and
+forgets it on any failure, so a cached 5xx can't block every later retry. A repeat of a
+sent id gets the original answer (`duplicate: true`); a repeat while the first is still
+running gets `409 in_progress`. Kept in memory: a provider restart forgets the ids,
+accepted for a mock.
+
+### Timeouts: half before, half after the delivery
+
+An injected timeout hangs until the client gives up. Half of them hang before
+processing (nothing sent, an ordinary retry); half record the delivery first, so the
+worker times out on a message that did go out, and its retry must come back as a
+duplicate rather than a second send. That second case is the one the idempotency key
+exists for, so the mock makes sure it happens.
+
+### Permanent failures come from fixed recipients
+
+The provider rejects SMS numbers that aren't Turkish mobiles and email domains ending
+in `.invalid` with a `400`, and the seed contains one user of each, matching the example
+brief. Random 400s would make the permanent-failure path appear by chance; fixed ones
+make it appear in every demo and test.
+
+### Worker health is checked, and reported through the API
+
+The worker opens a small `/healthz` that is healthy only if the DB answers and each
+channel loop ran in the last 10 seconds, so a stuck loop is caught, not just a dead
+process. The dashboard can't reach the worker, so the API's `/metrics` includes the
+worker's health.
+
+### Equal jitter for every backoff
+
+Backoffs wait between d/2 and d (equal jitter), for Claude calls and for sends alike, from
+one helper. Full jitter (0 to d) spreads retries best but can retry almost immediately;
+a symmetric ±20% barely spreads them. The per-channel limiter already smooths a herd of
+retries, so the difference is small, and one rule is easier to reason about.

@@ -8,20 +8,54 @@
 
 ## Services
 - Containers run in docker compose: postgres, api, worker, mock-provider, frontend
-- One Go binary, two entrypoints (`./app api`, `./app worker`), run as two separate containers.
-  Shares the same models, LLMClient, and validation code. Kept as one binary to avoid duplicating that code; run as separate containers so a crash in one doesn't take down the other.
+- One Go binary, three long-running entrypoints (`./app api`, `./app worker`,
+  `./app mock-provider`), each its own container. Shares the same models, LLMClient, and
+  validation code. Kept as one binary to avoid duplicating that code; run as separate
+  containers so a crash in one doesn't take down the others.
 - A third entrypoint, `./app migrate`, runs as a one-shot `migrate` service: applies the
   schema and loads a deterministic seed (fixed random seed, so tests and demos see the same
   data; the example brief is guaranteed to match more than 0 users).
 - Startup order: `postgres` (healthcheck: `pg_isready`) → `migrate`
   (`depends_on: postgres: service_healthy`) → `api` and `worker`
   (`depends_on: migrate: service_completed_successfully`). Kept separate from API startup so
-  API restarts don't re-run migrations and responsibilities stay clear.
+  API restarts don't re-run migrations and responsibilities stay clear. `worker` also
+  waits for `mock-provider: service_healthy`.
 - `frontend`: the Vue app is built and served by nginx, which proxies `/api` to the API
   (no CORS setup needed).
-- Graceful shutdown: on SIGTERM the worker stops claiming, finishes its in-flight batch
-  and exits; anything left in `sending` is recovered by lease expiry. The API drains
+- Graceful shutdown: on SIGTERM the worker stops claiming, lets sends already on the wire
+  finish (bounded by the HTTP timeout) and writes their results, hands claimed rows still
+  waiting for the rate limiter back with their attempt refunded, and exits. A row whose
+  result couldn't be written stays `sending` and is recovered by lease expiry. The API drains
   open requests and closes SSE streams.
+
+## Configuration
+Environment variables, all with working defaults (`.env.example` lists them):
+
+| Variable | Default | Used by |
+|---|---|---|
+| `DATABASE_URL` | set in compose | migrate, api, worker |
+| `API_ADDR` | `:8080` | api |
+| `ANTHROPIC_API_KEY`, `LLM_PROVIDER`, `ANTHROPIC_MODEL`, `LLM_EFFORT_AUDIENCE`, `LLM_EFFORT_MESSAGES`, `LLM_REFUSAL_FALLBACK` | see LLM | api |
+| `PROVIDER_URL` | `http://mock-provider:8090` | worker |
+| `WORKER_HEALTH_ADDR` | `:8081` | worker |
+| `WORKER_RATE_PER_CHANNEL` | `100` | worker |
+| `WORKER_CONCURRENCY_PER_CHANNEL` | `32` | worker |
+| `WORKER_BATCH_SIZE` | `20` | worker |
+| `WORKER_LEASE` | `30s` | worker |
+| `WORKER_MAX_ATTEMPTS` | `5` | worker |
+| `WORKER_BACKOFF_BASE` | `1s` | worker |
+| `WORKER_HTTP_TIMEOUT` | `3s` | worker |
+| `WORKER_POLL_INTERVAL` | `200ms` (when the queue is empty) | worker |
+| `PROVIDER_ADDR` | `:8090` | mock-provider |
+| `PROVIDER_RATE_PER_CHANNEL` | `100` | mock-provider |
+| `PROVIDER_ERROR_RATE` | `0.05` | mock-provider |
+| `PROVIDER_TIMEOUT_RATE` | `0.01` | mock-provider |
+| `PROVIDER_THROTTLE_EVERY`, `PROVIDER_THROTTLE_FOR` | `30s`, `2s` | mock-provider |
+| `PROVIDER_LATENCY_MIN_MS`, `PROVIDER_LATENCY_MAX_MS` | `50`, `300` | mock-provider |
+| `PROVIDER_SEED` | empty (random) | mock-provider |
+
+Ports published to the host: 8080 (API) and 8090 (mock provider, so `/deliveries` can be
+opened). The worker's 8081 stays inside the compose network.
 
 ## Data
 - User fields: 
@@ -49,7 +83,9 @@
   relative to load time so "last 30 days" stays meaningful. Each user gets a behavior
   profile (passive / cart abandoner / buyer / stale cart / returning). Fixed edge-case users
   are always included (long name, empty name, 29/31 days, bought after cart, missing
-  phone/email, no consent). Loaded with `COPY` in one transaction.
+  phone/email, no consent, and two recipients the provider rejects: a phone number that
+  isn't a Turkish mobile and an email on a `.invalid` domain). Loaded with `COPY` in one
+  transaction.
 - LLM call log: `llm_calls` table, one row per Claude call: campaign_id, step
   ('audience' | 'messages'), prompt_version, raw_response, validation_errors (jsonb),
   repair_attempt, transport_attempt, input_tokens, output_tokens, latency_ms, created_at.
@@ -88,8 +124,9 @@
 - Indexes:
   ```sql
   -- worker claim: partial indexes stay small since they only contain rows still awaiting work
-  CREATE INDEX ON messages (next_attempt_at) WHERE status IN ('pending', 'retry_scheduled');
-  CREATE INDEX ON messages (locked_until)    WHERE status = 'sending';
+  -- (channel first: each channel's loop claims only its own rows)
+  CREATE INDEX ON messages (channel, next_attempt_at) WHERE status IN ('pending', 'retry_scheduled');
+  CREATE INDEX ON messages (channel, locked_until)    WHERE status = 'sending';
   -- dashboard aggregate (GROUP BY channel, status), index-only scan
   CREATE INDEX ON messages (campaign_id, channel, status);
   -- segment: "most recent cart_add" and "purchase after it" per user
@@ -284,6 +321,8 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
 | `POST /api/campaigns/{id}/audience/refresh` | recounts the audience for today (no Claude call) |
 | `POST /api/campaigns/{id}/approve` `{content}` | validates the final content and queues the messages |
 | `GET /api/campaigns`, `GET /api/campaigns/{id}` | read |
+| `GET /api/campaigns/{id}/events` | live delivery counts as an SSE stream (see Monitoring) |
+| `GET /metrics` | queue depth, message counts, LLM numbers, worker health (see Monitoring) |
 | `GET /healthz` | DB ping |
 
 - The messages stream is a `POST` (it creates content), read by the frontend with
@@ -304,7 +343,7 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
 - A new audience resets the campaign to `draft` and clears the draft and the
   acknowledgement: lengths, wording and the unsupported list all depend on the segment.
 - The runtime image has no shell or curl, so the compose healthcheck runs
-  `/app healthcheck`, which calls `/healthz`.
+  `/app healthcheck`, which calls `/healthz` (see Monitoring for the other services).
 
 ## Sending
 - What happens when the marketer clicks "approve"?
@@ -382,35 +421,85 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
   (see the retry strategy below for intermediate states).
 
 - How does the worker claim rows, and what if it crashes mid-send?
-  The worker claims a small batch in a short transaction, then sends outside of it
-  (no DB transaction is held open during the HTTP call):
+  Each channel runs its own loop with its own claim query, its own pool of send
+  goroutines (`WORKER_CONCURRENCY_PER_CHANNEL`, default 32) and its own rate limiter. A
+  loop claims only when its pool has free slots, and at most that many rows (capped by
+  `WORKER_BATCH_SIZE`, default 20), so claimed-but-unsent rows never pile up in memory.
+  The pool is what makes 100 msg/s reachable: with 50–300 ms provider latency, 5–30
+  sends are in flight per channel, while one sequential sender would manage about 5/s.
+
+  Why one loop per channel: rows queued by the same approve share the same
+  `next_attempt_at`, so a shared `ORDER BY next_attempt_at LIMIT n` claim returns them in
+  no particular order. A batch could be almost all email while the SMS pool idles, and an
+  email channel paused by a 429 would hold the SMS rows of the same batch until their
+  lease ran out. With separate loops, a pause or a backlog on one channel is invisible to
+  the other.
+
+  The claim runs in a short transaction; the HTTP call happens outside it:
   ```sql
-  UPDATE messages SET status = 'sending', locked_until = now() + interval '30 seconds',
+  UPDATE messages SET status = 'sending', locked_until = now() + $lease,
                       attempts = attempts + 1, updated_at = now()
   WHERE id IN (
     SELECT id FROM messages
-    WHERE status IN ('pending', 'retry_scheduled') AND next_attempt_at <= now()
+    WHERE channel = $1 AND status IN ('pending', 'retry_scheduled')
+      AND next_attempt_at <= now()
     ORDER BY next_attempt_at
-    LIMIT 50
+    LIMIT $2
     FOR UPDATE SKIP LOCKED
   )
   RETURNING *;
   ```
-  A second, identical claim runs with `WHERE status = 'sending' AND locked_until < now()`
-  (lease expired: worker died). The two conditions are kept as separate queries instead of
-  one `OR`, so each can use its own partial index (see Data → Indexes).
-  `SKIP LOCKED` keeps concurrent claimers from grabbing the same row. If the worker crashes
-  after claiming, the lease expires and the row is picked up again. Because the same
-  `message_id` is reused on that attempt, the provider deduplicates it — together this gives
-  "at-least-once attempt, at-most-once send".
+  A second, identical claim runs with `WHERE channel = $1 AND status = 'sending' AND
+  locked_until < now()` (lease expired: the worker died). The two conditions are kept as
+  separate queries instead of one `OR`, so each can use its own partial index (see Data →
+  Indexes). `SKIP LOCKED` keeps concurrent claimers from grabbing the same row. If the
+  worker crashes after claiming, the lease expires and the row is picked up again. Because
+  the same `message_id` is reused on that attempt, the provider deduplicates it — together
+  this gives "at-least-once attempt, at-most-once send".
+
+  The result is written with a fenced update:
+  ```sql
+  UPDATE messages SET status = $3, ... WHERE id = $1 AND status = 'sending' AND attempts = $2;
+  ```
+  `attempts` as read at claim time is the fencing token. If the lease expired and the row
+  was claimed again, `attempts` has moved on, the late result updates 0 rows and is
+  dropped. Without it, a late `retry_scheduled` could overwrite a `sent`.
+
+  The lease (`WORKER_LEASE`, 30 s) has to outlast everything a claimed row waits for: the
+  HTTP timeout (3 s) and the limiter (a few hundred ms with small batches). A channel
+  pause can be longer, so a pause never holds claimed rows: a goroutine that finds its
+  channel paused hands the row back (`retry_scheduled` at the end of the pause, attempt
+  refunded, same fenced update) instead of sleeping on it.
 
 - What is the retry strategy?
-  - Retryable: network timeout, 5xx, 429. Permanent: other 4xx (e.g. invalid number) →
-    `failed` immediately, no retry.
-  - Exponential backoff with jitter: base 1s, doubling (1s, 2s, 4s, 8s, 16s) ± random
-    jitter, so retries don't all hit the provider at the same moment. For 429,
-    `Retry-After` takes precedence if it's longer than the computed delay.
-  - At most 5 attempts; after the last one the message becomes `failed` with `last_error`.
+  | Provider answer | Message becomes | Attempt | Channel |
+  |---|---|---|---|
+  | `200` | `sent` (`provider_message_id`, `sent_at`) | counted | — |
+  | `200` with `duplicate: true` | `sent`, same as above | counted | — |
+  | `400` / other 4xx | `failed`, no retry | counted | — |
+  | `409 in_progress` | `retry_scheduled`, backoff | counted | — |
+  | `429` | `retry_scheduled` at now + `Retry-After` | refunded | paused for `Retry-After` |
+  | 5xx, timeout | `retry_scheduled`, backoff | counted | — |
+  | connection refused / DNS failure | `retry_scheduled` at the end of the pause | refunded | paused 1, 2, 4 … 30 s; reset by the next success |
+
+  - Backoff: base 1 s (`WORKER_BACKOFF_BASE`), doubling per counted attempt, with equal
+    jitter: the wait is between d/2 and d. Same helper as the LLM transport retries.
+  - At most 5 counted attempts (`WORKER_MAX_ATTEMPTS`); a retryable failure on the last one
+    makes the message `failed` with `last_error`.
+  - A 429 and an unreachable provider don't count, because they say nothing about the
+    message. The worker can't tell why the provider throttled (its own rate limit or load),
+    so every 429 gets the same reaction. A refused connection never reached the provider,
+    so the message certainly wasn't sent; without the refund, a 20-second outage would
+    burn all five attempts (1 + 2 + 4 + 8 s of backoff) and fail the whole campaign. 5xx
+    and timeouts do count, because the request may have arrived. Accepted consequence: a
+    message can be rescheduled indefinitely while the provider throttles or is down; it
+    stays visible as `retry_scheduled`.
+  - The attempt is counted at claim and refunded on these outcomes (`attempts - 1` in the
+    fenced update), rather than counted when the result is written: a message that
+    crashes the worker on every attempt then still runs out of attempts.
+  - `409 in_progress` is the one 4xx that isn't permanent (see Mock provider). It counts:
+    it only happens when a lease or the HTTP timeout ran out while the provider was still
+    working, which is rare, and a refunded path that never ends isn't worth it there.
   - The next attempt time is stored in `next_attempt_at`; the worker only picks rows whose
     `next_attempt_at <= now()`.
   - State machine:
@@ -424,69 +513,147 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
   Two layers:
   1. `UNIQUE (campaign_id, user_id, channel)` on the `messages` table — the row can only
      exist once, so it can't be queued twice even if "approve" is clicked twice.
-  2. A stable `message_id` (e.g. the message row's id) is sent to the mock provider on every
-     attempt, including retries. The provider treats a repeated `message_id` as already
-     handled, so a retry after a timeout — where you don't know if the first attempt
-     actually went through — can't cause a duplicate send.
+  2. The message row's id is sent to the mock provider as `message_id` on every attempt,
+     including retries. The provider treats a repeated `message_id` as already handled, so
+     a retry after a timeout — where you don't know if the first attempt actually went
+     through — can't cause a duplicate send.
 
 - How is the 100 msg/s per channel limit enforced?
   A single worker replica runs one in-memory token bucket per channel
-  (`golang.org/x/time/rate`, 100 tokens/s). Every send to the provider waits on its
-  channel's limiter first, so SMS and email are throttled independently.
-  On a 429 the worker respects `Retry-After` and pauses that channel's sends for that
-  duration.
+  (`golang.org/x/time/rate`, 100 tokens/s, burst 1). Every send to the provider waits on
+  its channel's limiter first, so SMS and email are throttled independently, and burst 1
+  means no 1-second window ever holds more than 100 sends (plus one at the boundary).
+  On a 429 the worker respects `Retry-After` and pauses that channel for that duration.
+  The provider limits with the same algorithm (see Mock provider) rather than a fixed
+  one-second window. A fixed window and a token bucket measure the same rate differently:
+  a compliant client with a full bucket can put 100 + burst requests into the first
+  window, a smooth 100/s stream can land 101 in one window, and counting after the
+  injected latency would bunch requests into some windows and starve others. The client
+  would get 429s for traffic that keeps the rule. A token bucket with a little tolerance
+  (burst 10), counted on arrival, never throttles a client that keeps 100/s, so a 429
+  always means something to react to.
   Running only one worker replica is a deliberate choice: an in-memory limiter can't be
   shared across replicas, and horizontal scaling of the worker is out of scope for this case.
 
 ## Monitoring
-- Health check: `GET /healthz` on the API returns `200 {"status":"ok","db":"ok"}` after a
-  DB ping, `503` otherwise. Used by the docker compose healthcheck.
-- Metrics: `GET /metrics` returns plain JSON computed from the DB — no Prometheus:
+- Health checks, one per service:
+  - API `GET /healthz`: `200 {"status":"ok","db":"ok"}` after a DB ping, `503` otherwise.
+  - Worker `GET /healthz` on `WORKER_HEALTH_ADDR` (`:8081`, inside the compose network
+    only): `200` when the DB answers a ping and each channel loop has completed an
+    iteration (with or without work) in the last 10 s; `503` otherwise, so a stuck loop
+    shows up, not just a dead process.
+  - Mock provider `GET /healthz`: `200`.
+  - The runtime image has no shell or curl; compose healthchecks run
+    `/app healthcheck <url>`.
+- Metrics: `GET /metrics` returns plain JSON computed from the DB — no Prometheus — plus
+  the worker's health, which the API fetches from the worker's `/healthz` (1 s timeout;
+  `unreachable` if it doesn't answer), so the dashboard can show it:
   ```json
   {
     "queue_depth": {"sms": 120, "email": 340},
     "messages": {"sms": {"sent": 900, "failed": 3, "retry_scheduled": 12}, "email": {"...": 0}},
-    "llm": {"calls": 42, "validation_failures": 5}
+    "llm": {"calls": 42, "validation_failures": 5},
+    "worker": {"status": "ok"}
   }
   ```
   Simple to consume from the dashboard and needs no extra library or container.
 
 - How do worker status changes reach the frontend live?
   The API and worker are separate containers and don't talk directly; Postgres is the
-  shared source of truth. For each open SSE connection (`GET /campaigns/{id}/events`) the
-  API polls aggregated counts about once per second:
+  shared source of truth. For each open SSE connection (`GET /api/campaigns/{id}/events`)
+  the API polls aggregated counts about once per second:
   ```sql
   SELECT channel, status, count(*) FROM messages WHERE campaign_id = $1 GROUP BY 1, 2;
   ```
   and pushes an event to the client only when the counts changed. The stream closes once the
   campaign has no `pending` / `sending` / `retry_scheduled` rows left.
   Chosen over `LISTEN/NOTIFY`: no extra connection management or reconnect logic, and a
-  ~1s delay is fine for a dashboard. The aggregate query uses an index on
-  `messages (campaign_id, status)`.
+  ~1s delay is fine for a dashboard. The aggregate query uses the index on
+  `messages (campaign_id, channel, status)`.
 
 ## Testing
 `make test` needs only Docker; no API key, no running compose stack.
 - Unit tests: content validator (limits counted in runes, placeholders), segment validator
   and query builder (generated SQL + parameters, rejected fields/ops/values, city
   normalization), template rendering and empty-name fallback, retry classification and
-  backoff, rate limiter, LLM repair loop and give-up path (scripted `MockClient`).
+  backoff, rate limiter, LLM repair loop and give-up path (scripted `MockClient`), mock
+  provider (dedup, `in_progress`, failures not cached, throttle windows, invalid
+  recipients).
 - Integration tests: testcontainers-go starts a throwaway Postgres per test package. Covers
-  claim with `SKIP LOCKED` and lease expiry, idempotent approve under concurrent requests,
-  consent filtering, and an end-to-end run against a mock provider with a high error/429
-  rate asserting that every message ends `sent` / `failed` / `skipped` and nobody is sent
-  the same message twice.
+  claim with `SKIP LOCKED` and lease expiry, fenced result writes, idempotent approve under
+  concurrent requests, consent filtering, and an end-to-end run against an in-process mock
+  provider (fixed `PROVIDER_SEED`) with high error, timeout and throttle rates, asserting
+  that every message ends `sent` / `failed` / `skipped`, that `/deliveries` lists each
+  `message_id` at most once and matches the `sent` rows, and that the invalid recipients
+  end `failed` after one attempt. A second run lowers the provider's rate limit below the
+  worker's to exercise rate-limit 429s.
 - Chosen over the compose Postgres so tests are isolated and don't depend on stack state;
   chosen over unit-only because the reliability guarantees live in Postgres behavior
   (`SKIP LOCKED`, `ON CONFLICT`) that mocks can't prove.
 
 ## Mock provider
-- Synchronous: each request returns sent or an error immediately; no delivery webhooks.
-- Failure injection configurable by environment variables, with defaults of 5% 5xx, 5%
-  429 with `Retry-After`, 1% timeouts and 50–300 ms latency, so retry and rate-limit
-  logic is exercised on every run.
-- Its own limit of 100 messages/s per channel; exceeding it returns 429.
-- Idempotent by `message_id`: a repeated id returns the original result without sending
-  again, so a retry after a timeout can't produce a duplicate.
+`./app mock-provider`, same binary as the API and worker, its own container on
+`PROVIDER_ADDR` (`:8090`, also published to the host so `/deliveries` can be opened in a
+browser). No authentication. Synchronous: each request returns sent or an error
+immediately; no delivery webhooks.
+
+- Endpoints:
+  ```
+  POST /sms    {"message_id": "1842", "to": "+905321234567", "body": "..."}
+  POST /email  {"message_id": "1843", "to": "ayse.yilmaz.17@example.com",
+                "subject": "...", "body": "..."}
+  GET  /deliveries
+  GET  /healthz
+  ```
+  `message_id` is a string (our `messages.id`), treated as opaque.
+
+  | Outcome | Status | Body |
+  |---|---|---|
+  | Sent | `200` | `{"provider_message_id": "sms_9f2c…", "duplicate": false}` |
+  | Same `message_id` already sent | `200` | same `provider_message_id`, `"duplicate": true` |
+  | Invalid recipient | `400` | `{"error": "invalid_recipient", "message": "…"}` |
+  | Missing or malformed field | `400` | `{"error": "invalid_request", "message": "…"}` |
+  | Same `message_id` still being processed | `409` | `{"error": "in_progress"}` |
+  | Throttled | `429` + `Retry-After: <seconds>` | `{"error": "rate_limited"}` |
+  | Server error | `500` / `503` | `{"error": "provider_error"}` |
+
+- Order of checks per request: validate the request → idempotency → rate limit and
+  throttle window → injected failure → latency → record the delivery. A duplicate is
+  answered without consuming a rate-limit token.
+- Idempotency by `message_id`, kept in memory as `in_progress` or `sent`:
+  - A new id is marked `in_progress`. On success it becomes `sent` with its
+    `provider_message_id`; on any failure (5xx, 429) the entry is removed, so failures are
+    never cached and the next attempt is processed normally.
+  - A repeated id that is `sent` returns the original answer with `duplicate: true`; one
+    that is `in_progress` returns `409 in_progress`.
+  - Limitation: a provider restart forgets the ids. Accepted for a mock.
+- Invalid recipients (permanent `400`), fixed rather than random so they are predictable
+  and appear in every demo: an SMS number that isn't a Turkish mobile
+  (`^\+905\d{9}$`), an email address whose domain ends in `.invalid` (RFC 2606, never
+  real). The seed includes one user of each (see Data).
+- Rate limit: a token bucket per channel, `PROVIDER_RATE_PER_CHANNEL` (100/s) with burst
+  10, counted when the request arrives, before the injected latency. Exceeding it
+  returns `429` with `Retry-After: 1`.
+- Throttle windows: random, per channel, on average every `PROVIDER_THROTTLE_EVERY`
+  (30 s) for `PROVIDER_THROTTLE_FOR` (2 s). During a window every request on that channel
+  gets `429` with `Retry-After` set to the rest of the window (rounded up). Real providers
+  throttle in episodes, not on independent random requests; a 5% chance per request
+  would mean about five 429s a second at 100 msg/s, and since `Retry-After` is at least
+  1 s and pauses the channel, the channel would hardly ever send.
+- Server errors: `PROVIDER_ERROR_RATE` (5%) of requests return 5xx.
+- Timeouts: `PROVIDER_TIMEOUT_RATE` (1%) of requests hang until the client disconnects
+  (at most 30 s), so the hang always outlasts the worker's `WORKER_HTTP_TIMEOUT` (3 s)
+  whatever it's set to. Half hang before processing (nothing sent, an ordinary retry);
+  half record the delivery first and then hang, so the message went out but the worker
+  never heard. Its retry gets `200 duplicate: true` and the row becomes `sent` with a
+  single delivery: the case the idempotency key exists for.
+- Latency: uniform between `PROVIDER_LATENCY_MIN_MS` and `PROVIDER_LATENCY_MAX_MS`
+  (50–300 ms).
+- `PROVIDER_SEED` fixes the random source for tests; empty means random.
+- `GET /deliveries`: totals per channel (requests, deliveries, duplicates answered,
+  rejections by reason) and the list of delivered messages (`message_id`, channel, `to`,
+  `provider_message_id`, `delivered_at`, `requests` = how many times that id was
+  requested). Proof that retries didn't turn into duplicate sends.
 
 ## Scope
 - Bonus features (scheduled sending, A/B variants, content in the user's language, CI)
