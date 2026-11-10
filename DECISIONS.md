@@ -186,12 +186,27 @@ text longer, and over asking Claude for a second, name-less variant of every fie
 doubles the schema, validation and approval UI. Weak spot, accepted:
 `"Sevgili {{first_name}}!"` → `"Sevgili!"`.
 
-### Messages are Turkish for now; the language is an explicit parameter
+### Messages in each recipient's language, written in one call
 
-The prompt names the target language instead of "write in the brief's language", the
-campaign stores `content_language`, and rendering capitalizes by it. Only `tr` is used
-today. Per-recipient language later means a translated variant per language with the
-same mechanism, not a change to the flow.
+Every recipient gets the messages in their preferred language (`users.language`: Turkish
+or English), whatever language the brief is written in. A campaign keeps one draft per
+language (`campaign_contents`), and only for the languages its audience has a reachable
+recipient in: nobody reads, checks or approves a text that would go to no one. The
+audience count is kept per language, so each draft's length limits are measured with
+the longest name among its own recipients.
+
+All languages are written in one call, as one JSON object keyed by language. The
+alternatives were a call per language, or Turkish first and then a translation. One call
+keeps the versions saying the same thing (same offer, same tone) and keeps one stream and
+one repair loop; the prompt asks for each language to be written natively, not as a
+translation of the other. Revising picks the languages to rewrite: the others are sent as
+context and kept as they are, so a fix to the English text can't change a Turkish text
+the marketer already checked, and an edit in one tab survives a revision of the other.
+
+A language can gain its first reachable recipient when the audience is refreshed; the
+campaign then stays a draft until that language is written. If a recipient's language
+still has no text at approval (an audience counted before per-language counts), the
+approval is refused rather than sending them another language.
 
 ### Rendering at enqueue happens in Go
 

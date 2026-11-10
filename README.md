@@ -83,8 +83,8 @@ biri kendi container'ında çalışır. Ortak durum yalnızca Postgres'te tutulu
 
 Claude'un çıktısı SQL'e ya da bir alıcıya ulaşmadan önce her zaman backend'den geçer.
 
-- **İki adım, iki JSON şeması.** *Kitle* adımı kitle kurallarını, *mesaj* adımı SMS'i,
-  e-posta konusunu ve gövdesini döner. İkisi de structured outputs kullanır, yani cevap
+- **İki adım, iki JSON şeması.** *Kitle* adımı kitle kurallarını, *mesaj* adımı her dil
+  için SMS'i, e-posta konusunu ve gövdesini döner. İkisi de structured outputs kullanır, yani cevap
   her zaman parse edilebilir JSON'dur.
 - **Kitle kuralları SQL değil, beyaz listeli bir DSL.** Yalnızca dört alana izin var
   (`city`, `language`, `cart_added_days_ago`, `purchased_after_cart`); her birinin kendi
@@ -93,8 +93,14 @@ Claude'un çıktısı SQL'e ya da bir alıcıya ulaşmadan önce her zaman backe
   zaman kodda uygulanır.
 - **İş kuralları her cevapta kontrol edilir.** Beyaz liste, bilinen şehirler, değer
   aralıkları, SMS ≤ 160 ve konu ≤ 80 karakter (Unicode karakter olarak sayılır;
-  `{{first_name}}` kitledeki en uzun isim kadar hesaplanır) ve tek izinli değişkenin
-  `{{first_name}}` olması.
+  `{{first_name}}` o dildeki alıcıların en uzun ismi kadar hesaplanır) ve tek izinli
+  değişkenin `{{first_name}}` olması.
+- **Her alıcı kendi dilinde mesaj alır.** Pazarlamacı brief'i istediği dilde yazar;
+  mesajlar kitlede ulaşılabilir alıcısı olan her dil (Türkçe, İngilizce) için tek çağrıda,
+  her dilde ayrı ayrı yazılır, birbirinin çevirisi olarak değil. Kampanya sayfasında her
+  dil kendi sekmesindedir. Revize ederken hangi dillerin yeniden yazılacağı seçilir;
+  seçilmeyen diller korunur ve tutarlılık için Claude'a bağlam olarak verilir. Onayda
+  her alıcıya `users.language` değerine göre o dilin metni gider.
 - **Düzeltme döngüsü.** Kurala uymayan cevap somut hatalarla Claude'a geri gönderilir
   (ör. "SMS 178 karakter, en az 18 kısalt"). Her adımda en fazla 2 düzeltme turu ve
   bunlardan bağımsız olarak en fazla 2 bağlantı tekrarı (backoff ve `retry-after` ile)
@@ -210,11 +216,9 @@ ai-sessions/        Claude Code oturum kayıtları
 
 ## Yapılmayanlar / bilinen sınırlamalar
 
-- **Bonus özellikler:** zamanlanmış gönderim, A/B varyantları, kullanıcının dilinde
-  içerik ve CI yapılmadı. Alıcı başına dil desteğinin planı
-  `docs/ARCHITECTURE_DRAFT.md` dosyasının "Later" bölümünde.
-- **Mesajlar her zaman Türkçe.** İngilizce tercih eden kullanıcılar da Türkçe metin alır.
-  Dil akışta zaten ayrı bir parametre olduğu için sonradan eklenebilir.
+- **Bonus özellikler:** zamanlanmış gönderim, A/B varyantları ve CI yapılmadı.
+- **İki dil.** Mesajlar Türkçe ve İngilizce yazılır (`users.language` yalnızca bu iki
+  değeri alabiliyor). Arayüz metinleri Türkçe.
 - **Entegrasyon testleri bir Postgres adresi istiyor** (bkz. Testler). Plan, yalnızca
   Docker'ın yeterli olması için testcontainers-go kullanmaktı; bu henüz yapılmadı.
 - **SMS uzunluğu** case'teki 160 karakter kuralına göre kontrol ediliyor. GSM-7 / UCS-2
