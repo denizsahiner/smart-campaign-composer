@@ -285,6 +285,19 @@ in `.invalid` with a `400`, and the seed contains one user of each, matching the
 brief. Random 400s would make the permanent-failure path appear by chance; fixed ones
 make it appear in every demo and test.
 
+### Rejected recipients are listed on the campaign, from the messages table
+
+A failed message records why: `messages.failure` is `permanent` (the provider rejected
+it) or `retries_exhausted` (temporary errors used up the attempts). Only the permanent
+ones are listed on the campaign page and in its CSV download: those recipients have bad
+data that someone has to fix, while an exhausted retry says nothing about the recipient.
+The list reads the messages table, not the logs, so it stays as long as the campaign does
+instead of disappearing with log retention, and personal data (addresses) stays out of
+the logs. A column was chosen over parsing `last_error`, whose wording is the provider's.
+The CSV is made for Turkish Excel: UTF-8 with a BOM, `;` as the separator, and a `'` in
+front of values starting with `=`, `+`, `-` or `@` so Excel reads neither formulas nor
+phone numbers as numbers.
+
 ### Worker health is checked, and reported through the API
 
 The worker opens a small `/healthz` that is healthy only if the DB answers and each

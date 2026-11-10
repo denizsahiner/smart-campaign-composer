@@ -117,6 +117,11 @@ Claude'un çıktısı SQL'e ya da bir alıcıya ulaşmadan önce her zaman backe
 - **Retry.** 5xx ve timeout'lar jitter'lı üstel backoff ile en fazla 5 denemeye kadar
   tekrarlanır. 429 kanalı `Retry-After` süresi kadar durdurur ve deneme sayılmaz.
   Geçersiz alıcı ilk denemede kalıcı olarak başarısız olur.
+- **Gönderilemeyen alıcılar.** Sağlayıcının kalıcı olarak reddettiği alıcılar (geçersiz
+  telefon ya da e-posta) kampanya sayfasında ad, kanal, adres ve nedenle listelenir ve
+  Excel'de açılan bir CSV olarak indirilebilir
+  (`GET /api/campaigns/{id}/failures`, `…/failures.csv`). Denemeleri tükenen geçici
+  hatalar listelenmez; alıcının verisinde bir sorun yoktur.
 - **Idempotency.** Mesaj ID'si idempotency anahtarı olarak gönderilir; sağlayıcı tekrar
   gelen isteğe yeniden göndermek yerine `duplicate: true` döner. Mock sağlayıcı bazen
   mesajı teslim edip sonra cevap vermeden takılır; tam olarak bu durum test edilmiş olur.
