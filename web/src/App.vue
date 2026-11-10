@@ -3,7 +3,8 @@
     <div class="inner">
       <RouterLink to="/" class="brand">Smart Campaign Composer</RouterLink>
       <nav class="row">
-        <RouterLink to="/monitoring" class="nav small">
+        <RouterLink to="/" class="nav small" :class="{ current: onCampaigns }">Kampanyalar</RouterLink>
+        <RouterLink to="/monitoring" class="nav small" :class="{ current: route.path === '/monitoring' }">
           <i class="dot" :class="healthTone" :title="healthText" />İzleme
           <span class="sr-only">({{ healthText }})</span>
         </RouterLink>
@@ -17,8 +18,13 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRoute } from 'vue-router'
 import BaseButton from './components/BaseButton.vue'
 import { health } from './api'
+
+const route = useRoute()
+// A campaign's own page counts as part of the campaign list.
+const onCampaigns = computed(() => route.path === '/' || route.path.startsWith('/campaigns/'))
 
 const HEALTH_MS = 15000
 const h = ref(null)
@@ -48,8 +54,15 @@ onBeforeUnmount(() => clearInterval(timer))
 .inner { max-width: 720px; margin: 0 auto; padding: var(--space-4); display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
 .brand { font: 400 20px/26px var(--font-serif); color: var(--ink); text-decoration: none; }
 .cta { text-decoration: none; }
-.nav { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--ink); text-decoration: none; font-weight: 600; }
-.nav.router-link-active { color: var(--brand); }
+.nav {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);
+  color: var(--ink); text-decoration: none; font-weight: 600;
+  box-shadow: inset 0 -2px 0 transparent;
+  transition: background-color 120ms, box-shadow 120ms;
+}
+.nav:hover { background: var(--brand-tint); }
+.nav.current { color: var(--brand); box-shadow: inset 0 -2px 0 var(--brand); }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.success { background: var(--success); }
 .dot.danger { background: var(--danger); }
