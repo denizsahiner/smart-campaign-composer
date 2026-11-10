@@ -313,6 +313,34 @@ The CSV is made for Turkish Excel: UTF-8 with a BOM, `;` as the separator, and a
 front of values starting with `=`, `+`, `-` or `@` so Excel reads neither formulas nor
 phone numbers as numbers.
 
+### Scheduled sends: queued at approval, started by the claim
+
+A campaign can be approved for a later time (`send_at` on approve). Options considered:
+build the recipients and texts at send time (fresh audience, but an approved text could
+stop fitting a new language or a longer name, and it needs a scheduler process), or at
+approval. Chosen: at approval. The messages are queued exactly as for an immediate send,
+with `next_attempt_at = scheduled_at`, so what goes out is what the marketer saw, and the
+worker needed no new logic to wait. The staleness check stays at approval only; the
+14-day limit bounds how old the audience can get.
+
+The campaign has its own `scheduled` status rather than "approved with a future
+`scheduled_at`", so lists and queries don't have to compute it. It becomes `approved` in
+the worker's claim statement (a data-modifying CTE next to the message claim), not in a
+separate polling loop: the first message taken is the moment the send starts, in the same
+transaction.
+
+Cancel deletes the pending messages and puts the campaign back to `ready` with its
+drafts, so it can be edited and approved again; a `canceled` status that keeps the rows
+was rejected because the campaign could not be reused. Cancel deletes messages first and
+updates the campaign second, the same lock order as the claim, so the two can't
+deadlock. If the claim got a message first, that row is `sending` and the campaign is
+`approved`, the update matches nothing and the cancel rolls back with `409
+send_started`. Cancels are logged at warn so they show in `app_logs`.
+
+Rules for the time, Istanbul time: at least a minute ahead, at most 14 days, and not
+between 21:00 and 09:00 (commercial messages at night). The quiet hours apply to choosing
+the time only, not to immediate sends or retries that run past 21:00.
+
 ### Worker health is checked, and reported through the API
 
 The worker opens a small `/healthz` that is healthy only if the DB answers and each

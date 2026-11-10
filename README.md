@@ -117,6 +117,14 @@ Claude'un çıktısı SQL'e ya da bir alıcıya ulaşmadan önce her zaman backe
   bir update ile `ready → approved` olur. Kişiselleştirilmiş mesajlar Go'da üretilip
   `UNIQUE (campaign_id, user_id, channel)` kısıtıyla eklenir. Çift tıklama ya da ikinci
   sekme `409` alır, hiçbir şey iki kez kuyruğa girmez.
+- **Zamanlanmış gönderim.** Onayda "İleri tarihte gönder" seçilirse alıcılar ve metinler
+  yine onay anında sabitlenip kuyruğa yazılır; yalnızca her mesajın `next_attempt_at`
+  değeri seçilen zamana ayarlanır ve kampanya `scheduled` olur. Zaman İstanbul saatiyle
+  seçilir: en az 1 dakika, en çok 14 gün sonrası ve 09:00–21:00 arası (sessiz saatlere
+  zamanlanamaz). Worker ilk mesajı aldığı SQL ifadesinde kampanyayı `approved` yapar, ayrı
+  bir zamanlayıcı yok. Gönderim başlamadan `POST /api/campaigns/{id}/schedule/cancel`
+  bekleyen mesajları siler ve kampanyayı taslaklarıyla `ready`'ye döndürür; başladıysa
+  `409 send_started`.
 - **Worker.** Her kanalın kendi döngüsü var: lease ile `FOR UPDATE SKIP LOCKED`, saniyede
   100 mesaj hız limiti ve fencing'li sonuç yazımı. Bir worker ölürse satırları lease
   süresi dolunca tekrar alınır.
@@ -216,7 +224,9 @@ ai-sessions/        Claude Code oturum kayıtları
 
 ## Yapılmayanlar / bilinen sınırlamalar
 
-- **Bonus özellikler:** zamanlanmış gönderim, A/B varyantları ve CI yapılmadı.
+- **Bonus özellikler:** A/B varyantları ve CI yapılmadı.
+- **Zamanlanmış kampanyanın kitlesi onayda donar.** Onay ile gönderim arasında kitleye
+  giren ya da izni değişen kişiler hesaba katılmaz (en fazla 14 gün).
 - **İki dil.** Mesajlar Türkçe ve İngilizce yazılır (`users.language` yalnızca bu iki
   değeri alabiliyor). Arayüz metinleri Türkçe.
 - **Entegrasyon testleri bir Postgres adresi istiyor** (bkz. Testler). Plan, yalnızca
