@@ -25,20 +25,25 @@ const (
 )
 
 type audienceView struct {
-	Rules                   []segment.Rule `json:"rules"`
-	Description             []string       `json:"description"`
-	Reach                   segment.Counts `json:"reach"`
-	AsOf                    time.Time      `json:"as_of"`
-	UnsupportedCriteria     []string       `json:"unsupported_criteria"`
-	UnsupportedAcknowledged bool           `json:"unsupported_acknowledged"`
+	Rules       []segment.Rule `json:"rules"`
+	Description []string       `json:"description"`
+	Reach       segment.Counts `json:"reach"`
+	// ContentLanguages are the languages the messages must be written in: those with a
+	// reachable recipient (segment.Counts.ContentLanguages).
+	ContentLanguages        []string  `json:"content_languages"`
+	AsOf                    time.Time `json:"as_of"`
+	UnsupportedCriteria     []string  `json:"unsupported_criteria"`
+	UnsupportedAcknowledged bool      `json:"unsupported_acknowledged"`
 }
 
 type campaignView struct {
-	ID            int64                   `json:"id"`
-	Brief         string                  `json:"brief"`
-	Status        string                  `json:"status"`
-	Audience      *audienceView           `json:"audience"`
-	Content       *content.Content        `json:"content"`
+	ID       int64         `json:"id"`
+	Brief    string        `json:"brief"`
+	Status   string        `json:"status"`
+	Audience *audienceView `json:"audience"`
+	// Contents is the draft per language, null when there is none; ContentErrors carry
+	// the language in the path ("en.sms").
+	Contents      content.Set             `json:"contents"`
 	ContentErrors []validation.FieldError `json:"content_errors,omitempty"`
 	CreatedAt     time.Time               `json:"created_at"`
 	UpdatedAt     time.Time               `json:"updated_at"`
@@ -47,7 +52,7 @@ type campaignView struct {
 
 func (s *Server) view(c store.Campaign) (campaignView, error) {
 	v := campaignView{
-		ID: c.ID, Brief: c.Brief, Status: c.Status, Content: c.Content, ContentErrors: c.ContentErrors,
+		ID: c.ID, Brief: c.Brief, Status: c.Status, Contents: c.Contents, ContentErrors: c.ContentErrors,
 		CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt, ApprovedAt: c.ApprovedAt,
 	}
 	if a := c.Audience; a != nil {
@@ -57,6 +62,7 @@ func (s *Server) view(c store.Campaign) (campaignView, error) {
 		}
 		v.Audience = &audienceView{
 			Rules: seg.Rules, Description: seg.Describe(), Reach: a.Counts, AsOf: a.AsOf,
+			ContentLanguages:    nonNil(c.ContentLanguages()),
 			UnsupportedCriteria: a.Unsupported, UnsupportedAcknowledged: a.UnsupportedAckAt != nil,
 		}
 	}
@@ -251,4 +257,11 @@ func (s *Server) acknowledge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.getCampaign(w, r)
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -157,7 +158,7 @@ func fixtureFor(req Request) (string, error) {
 	case StepAudience:
 		return f.Audience, nil
 	case StepMessages:
-		return f.Messages, nil
+		return f.messagesFor(req.Schema)
 	default:
 		return "", fmt.Errorf("llm mock: unknown step %q", req.Step)
 	}
@@ -166,4 +167,23 @@ func fixtureFor(req Request) (string, error) {
 // normalizeBrief makes matching tolerant of case and whitespace differences.
 func normalizeBrief(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// messagesFor assembles the messages answer in the languages the schema requires.
+func (f Fixture) messagesFor(schema []byte) (string, error) {
+	var sch struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(schema, &sch); err != nil || len(sch.Required) == 0 {
+		return "", fmt.Errorf("llm mock: messages schema names no languages: %s", schema)
+	}
+	parts := make([]string, len(sch.Required))
+	for i, lang := range sch.Required {
+		m, ok := f.Messages[lang]
+		if !ok {
+			return "", fmt.Errorf("llm mock: no %q messages fixture", lang)
+		}
+		parts[i] = fmt.Sprintf("%q:%s", lang, m)
+	}
+	return "{" + strings.Join(parts, ",") + "}", nil
 }

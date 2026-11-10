@@ -36,12 +36,13 @@ const (
 )
 
 type Event struct {
-	Type    EventType               `json:"type"`
-	Delta   string                  `json:"delta,omitempty"`
-	Reason  RetryReason             `json:"reason,omitempty"`
-	Errors  []validation.FieldError `json:"errors,omitempty"`
-	Content *content.Content        `json:"content,omitempty"`
-	Message string                  `json:"message,omitempty"`
+	Type   EventType               `json:"type"`
+	Delta  string                  `json:"delta,omitempty"`
+	Reason RetryReason             `json:"reason,omitempty"`
+	Errors []validation.FieldError `json:"errors,omitempty"`
+	// Contents is the draft per language: the languages that were written, not the others.
+	Contents content.Set `json:"contents,omitempty"`
+	Message  string      `json:"message,omitempty"`
 }
 
 // Audience runs the audience step. Besides infrastructure errors it returns
@@ -65,12 +66,13 @@ func (c *Composer) Audience(ctx context.Context, campaignID int64, brief string,
 	return a, nil
 }
 
-// MessagesResult is the outcome of the messages step. When Valid is false, Content is the
-// last draft for the marketer to fix and Errors say what's wrong.
+// MessagesResult is the outcome of the messages step: content in the languages that were
+// asked for. When Valid is false, Contents is the last draft for the marketer to fix and
+// Errors say what's wrong (paths carry the language: "en.sms").
 type MessagesResult struct {
-	Content content.Content
-	Valid   bool
-	Errors  []validation.FieldError
+	Contents content.Set
+	Valid    bool
+	Errors   []validation.FieldError
 }
 
 // Messages runs the messages step, streaming progress to emit (which may be nil). The
@@ -80,11 +82,11 @@ func (c *Composer) Messages(ctx context.Context, campaignID int64, in prompt.Mes
 	if emit == nil {
 		emit = func(Event) {}
 	}
-	var parsed content.Content
+	var parsed content.Set
 	raw, exhausted, err := c.run(ctx, campaignID, prompt.MessagesRequest(in), emit,
 		func(raw []byte) error {
 			var perr error
-			parsed, perr = prompt.ParseMessages(raw, in.LongestFirstName)
+			parsed, perr = prompt.ParseMessages(raw, in.Options())
 			return perr
 		})
 	if err != nil {
@@ -94,19 +96,19 @@ func (c *Composer) Messages(ctx context.Context, campaignID int64, in prompt.Mes
 		return MessagesResult{}, err
 	}
 	if exhausted == nil {
-		emit(Event{Type: EventValidated, Content: &parsed})
-		return MessagesResult{Content: parsed, Valid: true}, nil
+		emit(Event{Type: EventValidated, Contents: parsed})
+		return MessagesResult{Contents: parsed, Valid: true}, nil
 	}
 
-	draft, derr := content.Decode(raw)
+	draft, derr := content.DecodeSet(raw, in.Codes())
 	if derr != nil {
 		// Not even decodable (structured outputs make this very unlikely): nothing to edit.
 		err := &ExhaustedError{Step: llm.StepMessages, Errors: exhausted.Errors}
 		emit(Event{Type: EventError, Message: errorMessage(err), Errors: exhausted.Errors})
 		return MessagesResult{}, err
 	}
-	emit(Event{Type: EventInvalid, Content: &draft, Errors: exhausted.Errors})
-	return MessagesResult{Content: draft, Errors: exhausted.Errors}, nil
+	emit(Event{Type: EventInvalid, Contents: draft, Errors: exhausted.Errors})
+	return MessagesResult{Contents: draft, Errors: exhausted.Errors}, nil
 }
 
 // errorMessage turns a step error into text for the marketer; details go to the logs and

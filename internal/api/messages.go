@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -13,12 +14,16 @@ import (
 )
 
 type messagesRequest struct {
-	// Feedback asks for a new version of the stored draft ("more formal").
+	// Languages to write; empty means every language the audience needs. The others'
+	// drafts are kept and shown to the model for consistency.
+	Languages []string `json:"languages"`
+	// Feedback asks for a new version of the stored drafts of Languages ("more formal").
 	Feedback string `json:"feedback"`
 }
 
-// generateMessages runs the messages step and streams it as Server-Sent Events: delta,
-// retry, then exactly one of validated, invalid or error (see compose.Event).
+// generateMessages runs the messages step for some or all of the campaign's languages
+// and streams it as Server-Sent Events: delta, retry, then exactly one of validated,
+// invalid or error (see compose.Event). Only the languages written are stored.
 //
 // It is a POST, not a GET, because it creates content; the frontend reads the stream
 // with fetch rather than EventSource. Preconditions are checked before the stream starts
@@ -54,9 +59,27 @@ func (s *Server) generateMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_feedback",
 			fmt.Sprintf("Feedback must be at most %d characters.", maxFeedbackRunes))
 		return
-	case req.Feedback != "" && c.Content == nil:
-		writeError(w, http.StatusUnprocessableEntity, "no_draft", "There is no draft to revise yet.")
-		return
+	}
+	needed := c.ContentLanguages()
+	if len(req.Languages) == 0 {
+		req.Languages = needed
+	}
+	var langs []prompt.Language
+	for _, l := range req.Languages {
+		if !slices.Contains(needed, l) {
+			writeError(w, http.StatusUnprocessableEntity, "invalid_language",
+				fmt.Sprintf("Nobody in this audience gets %q messages; languages: %s.", l, strings.Join(needed, ", ")))
+			return
+		}
+		if slices.ContainsFunc(langs, func(x prompt.Language) bool { return x.Code == l }) {
+			continue
+		}
+		if _, ok := c.Contents[l]; req.Feedback != "" && !ok {
+			writeError(w, http.StatusUnprocessableEntity, "no_draft", fmt.Sprintf("There is no %q draft to revise yet.", l))
+			return
+		}
+		lc := c.Audience.Counts.Languages[l]
+		langs = append(langs, prompt.Language{Code: l, Recipients: lc.Total, LongestFirstName: lc.LongestFirstName})
 	}
 	seg, err := s.validator.Parse(c.Audience.Segment)
 	if err != nil {
@@ -69,11 +92,7 @@ func (s *Server) generateMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.unlock(c.ID)
 
-	in := prompt.MessagesInput{Brief: c.Brief, Segment: seg, LongestFirstName: c.Audience.Counts.LongestFirstName,
-		Language: prompt.DefaultLanguage}
-	if req.Feedback != "" {
-		in.Previous, in.Feedback = c.Content, req.Feedback
-	}
+	in := prompt.MessagesInput{Brief: c.Brief, Segment: seg, Languages: langs, Current: c.Contents, Feedback: req.Feedback}
 
 	sse := newSSE(w)
 	// The final event is held back until the draft is stored, so a client that reloads
@@ -89,7 +108,7 @@ func (s *Server) generateMessages(w http.ResponseWriter, r *http.Request) {
 	if err != nil || final == nil {
 		return // cancelled, or an error event has been sent
 	}
-	if err := s.store.SetContent(r.Context(), c.ID, res.Content, in.Language, res.Errors); err != nil {
+	if err := s.store.SetContents(r.Context(), c.ID, res.Contents, res.Errors); err != nil {
 		slog.ErrorContext(r.Context(), "store draft failed", "err", err)
 		sse.send(compose.Event{Type: compose.EventError, Message: "The draft couldn't be saved. Please try again."})
 		return

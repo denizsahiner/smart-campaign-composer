@@ -33,7 +33,9 @@ func runLLMTry(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "provider: %s\n", name)
 
-	cities, longest := seed.Cities(), 15
+	// Without a database: both languages, with the longest seeded name.
+	cities := seed.Cities()
+	langs := []prompt.Language{{Code: "tr", Recipients: 1, LongestFirstName: 15}, {Code: "en", Recipients: 1, LongestFirstName: 15}}
 	var pool *pgxpool.Pool
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
 		if pool, err = pgxpool.New(ctx, dsn); err != nil {
@@ -61,11 +63,15 @@ func runLLMTry(ctx context.Context, args []string) error {
 			return err
 		}
 		printJSON("reach", counts)
-		longest = counts.LongestFirstName
+		langs = nil
+		for _, l := range counts.ContentLanguages() {
+			lc := counts.Languages[l]
+			langs = append(langs, prompt.Language{Code: l, Recipients: lc.Total, LongestFirstName: lc.LongestFirstName})
+		}
 	}
 
 	fmt.Fprintln(os.Stderr, "\n== messages (streaming)")
-	res, err := c.Messages(ctx, 0, prompt.MessagesInput{Brief: brief, Segment: a.Segment, LongestFirstName: longest},
+	res, err := c.Messages(ctx, 0, prompt.MessagesInput{Brief: brief, Segment: a.Segment, Languages: langs},
 		func(e compose.Event) {
 			switch e.Type {
 			case compose.EventDelta:
@@ -79,7 +85,7 @@ func runLLMTry(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("messages: %w", err)
 	}
-	printJSON("content", res.Content)
+	printJSON("contents", res.Contents)
 	printJSON("valid", res.Valid)
 	if !res.Valid {
 		printJSON("errors", res.Errors)

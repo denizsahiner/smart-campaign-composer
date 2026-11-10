@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -18,12 +19,15 @@ func readyCampaign(t *testing.T, e *env) (int64, map[string]any) {
 		t.Fatalf("generation: %v", names(evs))
 	}
 	c := e.get(id)
-	return id, c["content"].(map[string]any)
+	return id, c["contents"].(map[string]any)
 }
+
+// lang returns one language's content from a contents map.
+func lang(contents map[string]any, l string) map[string]any { return contents[l].(map[string]any) }
 
 func (e *env) approve(id int64, content any) (int, map[string]any) {
 	e.t.Helper()
-	return e.do("POST", path(id, "/approve"), map[string]any{"content": content})
+	return e.do("POST", path(id, "/approve"), map[string]any{"contents": content})
 }
 
 func (e *env) count(sql string, args ...any) int {
@@ -81,8 +85,17 @@ func TestApproveQueuesMessages(t *testing.T) {
 		t.Fatal("seed has an empty-name user in this segment; expected their SMS")
 	}
 	if n := e.count(`SELECT count(*) FROM messages m JOIN users u ON u.id = m.user_id
-		WHERE m.campaign_id = $1 AND u.first_name = '' AND m.body NOT LIKE 'Merhaba,%'`, id); n != 0 {
-		t.Errorf("%d empty-name messages don't start with \"Merhaba,\"", n)
+		WHERE m.campaign_id = $1 AND u.first_name = '' AND m.body NOT LIKE 'Merhaba,%' AND m.body NOT LIKE 'Hi,%'`, id); n != 0 {
+		t.Errorf("%d empty-name messages don't start with \"Merhaba,\" or \"Hi,\"", n)
+	}
+	// Each recipient gets their language.
+	if n := e.count(`SELECT count(*) FROM messages m JOIN users u ON u.id = m.user_id WHERE m.campaign_id = $1
+		AND m.channel = 'sms' AND ((u.language = 'tr') <> (m.body LIKE 'Merhaba%'))`, id); n != 0 {
+		t.Errorf("%d SMS in the wrong language", n)
+	}
+	byLang := q["by_language"].(map[string]any)
+	if byLang["tr"].(float64) == 0 || byLang["en"].(float64) == 0 {
+		t.Errorf("by_language = %v", byLang)
 	}
 	if wn := q["without_name"].(map[string]any); wn["sms"] != float64(emptyName) {
 		t.Errorf("without_name = %v, empty-name sms rows = %d", wn, emptyName)
@@ -125,7 +138,8 @@ func TestApproveIsIdempotent(t *testing.T) {
 	}
 
 	// A later approve, even with different content, changes nothing.
-	edited := map[string]any{"sms": "Başka metin", "email_subject": "Başka", "email_body": "Başka"}
+	other := map[string]any{"sms": "Başka metin", "email_subject": "Başka", "email_body": "Başka"}
+	edited := map[string]any{"tr": other, "en": other}
 	status, body := e.approve(id, edited)
 	if status != http.StatusConflict || errCode(body) != "already_approved" {
 		t.Fatalf("second approve: %d %v", status, body)
@@ -133,7 +147,7 @@ func TestApproveIsIdempotent(t *testing.T) {
 	if after := e.count(`SELECT count(*) FROM messages WHERE campaign_id = $1`, id); after != before {
 		t.Errorf("messages %d → %d", before, after)
 	}
-	if c := e.get(id); c["content"].(map[string]any)["sms"] != content["sms"] {
+	if c := e.get(id); lang(c["contents"].(map[string]any), "tr")["sms"] != lang(content, "tr")["sms"] {
 		t.Error("approved content was overwritten")
 	}
 }
@@ -141,11 +155,18 @@ func TestApproveIsIdempotent(t *testing.T) {
 func TestApproveRejectsInvalidContent(t *testing.T) {
 	e := newEnv(t)
 	id, content := readyCampaign(t, e)
-	bad := map[string]any{"sms": content["sms"].(string) + strings.Repeat(" uzun", 30), "email_subject": "{name}", "email_body": "x"}
+	bad := map[string]any{"en": content["en"], "tr": map[string]any{
+		"sms": lang(content, "tr")["sms"].(string) + strings.Repeat(" uzun", 30), "email_subject": "{name}", "email_body": "x"}}
 	status, body := e.approve(id, bad)
 	errs := body["error"].(map[string]any)["errors"].([]any)
-	if status != 422 || errCode(body) != "invalid_content" || len(errs) != 2 {
+	if status != 422 || errCode(body) != "invalid_content" || len(errs) != 2 || errs[0].(map[string]any)["path"] != "tr.sms" {
 		t.Fatalf("%d %v", status, body)
+	}
+	// Every language the audience has is required.
+	status, body = e.approve(id, map[string]any{"tr": content["tr"]})
+	errs = body["error"].(map[string]any)["errors"].([]any)
+	if status != 422 || len(errs) != 1 || errs[0].(map[string]any)["path"] != "en" {
+		t.Fatalf("without English: %d %v", status, body)
 	}
 	if e.get(id)["status"] != "ready" || e.count(`SELECT count(*) FROM messages WHERE campaign_id = $1`, id) != 0 {
 		t.Error("a rejected approve must change nothing")
@@ -158,7 +179,10 @@ func TestApproveHandWrittenContent(t *testing.T) {
 	e := newEnv(t, llm.Scripted{Raw: audienceOK},
 		llm.Scripted{Raw: tooLongMessages}, llm.Scripted{Raw: tooLongMessages}, llm.Scripted{Raw: tooLongMessages},
 		llm.Scripted{Raw: audienceOK})
-	fixed := map[string]any{"sms": "Merhaba {{first_name}}, sepetin bekliyor!", "email_subject": "Sepetin", "email_body": "Merhaba {{first_name}},"}
+	fixed := map[string]any{
+		"tr": map[string]any{"sms": "Merhaba {{first_name}}, sepetin bekliyor!", "email_subject": "Sepetin", "email_body": "Merhaba {{first_name}},"},
+		"en": map[string]any{"sms": "Hi {{first_name}}, your cart is waiting!", "email_subject": "Your cart", "email_body": "Hi {{first_name}},"},
+	}
 
 	id, _ := e.create("brief")
 	e.stream(id, map[string]any{})
@@ -178,7 +202,8 @@ func TestApproveHandWrittenContent(t *testing.T) {
 func TestApprovePreconditions(t *testing.T) {
 	e := newEnv(t, llm.Scripted{Raw: `{"rules":[{"field":"city","op":"eq","value":"Ankara"}],"unsupported_criteria":["30 yaş üstü"]}`})
 	id, _ := e.create("30 yaş üstü Ankaralılar")
-	valid := map[string]any{"sms": "Merhaba!", "email_subject": "Konu", "email_body": "Gövde"}
+	one := map[string]any{"sms": "Merhaba!", "email_subject": "Konu", "email_body": "Gövde"}
+	valid := map[string]any{"tr": one, "en": one}
 	if status, body := e.approve(id, valid); status != 409 || errCode(body) != "unsupported_not_acknowledged" {
 		t.Fatalf("unacknowledged: %d %v", status, body)
 	}
@@ -206,7 +231,7 @@ func TestStaleAudience(t *testing.T) {
 	}
 	calls := len(e.mock.Calls())
 	status, c := e.do("POST", path(id, "/audience/refresh"), nil)
-	if status != 200 || c["status"] != "ready" || c["content"] == nil {
+	if status != 200 || c["status"] != "ready" || c["contents"] == nil {
 		t.Fatalf("refresh: %d %v", status, c)
 	}
 	if len(e.mock.Calls()) != calls {
@@ -231,5 +256,25 @@ func TestRefreshRevalidatesDraft(t *testing.T) {
 	reach := c["audience"].(map[string]any)["reach"].(map[string]any)
 	if c["status"] != "draft" || len(errs) == 0 || reach["longest_first_name"].(float64) != 70 {
 		t.Fatalf("after refresh: status %v, errors %v, reach %v", c["status"], errs, reach)
+	}
+}
+
+// An audience counted before per-language counts is read as all in its old content
+// language. If it has recipients in another language, approval is refused (refresh to
+// recount by language) rather than sending them the wrong language.
+func TestLegacyAudienceNeedsRefreshForANewLanguage(t *testing.T) {
+	e := newEnv(t)
+	id, contents := readyCampaign(t, e)
+	e.pool.Exec(context.Background(), `UPDATE campaigns SET language_counts = NULL, content_language = 'tr' WHERE id = $1`, id)
+	if langs := e.get(id)["audience"].(map[string]any)["content_languages"]; fmt.Sprint(langs) != "[tr]" {
+		t.Fatalf("legacy languages = %v", langs)
+	}
+	status, body := e.approve(id, map[string]any{"tr": contents["tr"]})
+	if status != 409 || errCode(body) != "stale_audience" || e.count(`SELECT count(*) FROM messages WHERE campaign_id = $1`, id) != 0 {
+		t.Fatalf("%d %v", status, body)
+	}
+	status, c := e.do("POST", path(id, "/audience/refresh"), nil)
+	if status != 200 || fmt.Sprint(c["audience"].(map[string]any)["content_languages"]) != "[tr en]" || c["status"] != "ready" {
+		t.Fatalf("refresh: %d %v", status, c)
 	}
 }

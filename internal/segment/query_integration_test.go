@@ -3,6 +3,7 @@ package segment
 import (
 	"context"
 	"maps"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -205,6 +206,7 @@ func TestSegmentSQLMatchesReference(t *testing.T) {
 			}
 			want := map[int64]bool{}
 			wantSMS, wantEmail, wantLongest := 0, 0, 0
+			wantLangs := map[string]LanguageCounts{}
 			for _, u := range users {
 				var lc *time.Time
 				if at, ok := lastCart[u.ID]; ok {
@@ -212,13 +214,20 @@ func TestSegmentSQLMatchesReference(t *testing.T) {
 				}
 				if c.ref(u, lc, boughtAfter[u.ID]) {
 					want[u.ID] = true
-					wantLongest = max(wantLongest, utf8.RuneCountInString(u.FirstName))
+					n := utf8.RuneCountInString(u.FirstName)
+					wantLongest = max(wantLongest, n)
+					l := wantLangs[u.Language]
+					l.Total++
+					l.LongestFirstName = max(l.LongestFirstName, n)
 					if u.SMSConsent && u.Phone != nil {
 						wantSMS++
+						l.SMS++
 					}
 					if u.EmailConsent && u.Email != nil {
 						wantEmail++
+						l.Email++
 					}
+					wantLangs[u.Language] = l
 				}
 			}
 			if len(want) == 0 {
@@ -233,7 +242,8 @@ func TestSegmentSQLMatchesReference(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if wantC := (Counts{len(want), wantSMS, wantEmail, wantLongest}); counts != wantC {
+			wantC := Counts{Total: len(want), SMS: wantSMS, Email: wantEmail, LongestFirstName: wantLongest, Languages: wantLangs}
+			if !reflect.DeepEqual(counts, wantC) {
 				t.Fatalf("counts = %+v, want %+v", counts, wantC)
 			}
 		})

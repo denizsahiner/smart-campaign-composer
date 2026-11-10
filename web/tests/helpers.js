@@ -85,7 +85,8 @@ export function campaign({ audience, ...rest } = {}) {
   const defaultAudience = {
     rules: [{ field: 'city', op: 'eq', value: 'İstanbul' }],
     description: ['Şehir: İstanbul'],
-    reach: { total: 1200, sms: 900, email: 1000, longest_first_name: 10 },
+    reach: { total: 1200, sms: 900, email: 1000, longest_first_name: 10, languages: { tr: { total: 1200, sms: 900, email: 1000, longest_first_name: 10 } } },
+    content_languages: ['tr'],
     as_of: now,
     unsupported_criteria: [],
     unsupported_acknowledged: false,
@@ -95,7 +96,7 @@ export function campaign({ audience, ...rest } = {}) {
     brief: "İstanbul'da sepeti terk edenlere %30 indirim",
     status: 'ready',
     audience: audience === null ? null : { ...defaultAudience, ...audience },
-    content: null,
+    contents: null,
     created_at: now,
     updated_at: now,
     approved_at: null,

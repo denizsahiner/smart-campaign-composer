@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,16 +19,22 @@ import (
 	"github.com/denizsahiner/smart-campaign-composer/internal/compose"
 	"github.com/denizsahiner/smart-campaign-composer/internal/dbtest"
 	"github.com/denizsahiner/smart-campaign-composer/internal/llm"
+	"github.com/denizsahiner/smart-campaign-composer/internal/prompt"
 	"github.com/denizsahiner/smart-campaign-composer/internal/segment"
 	"github.com/denizsahiner/smart-campaign-composer/internal/store"
 )
 
 const (
-	validMessages = `{"sms":"Merhaba {{first_name}}, sepetin seni bekliyor!","email_subject":"Sepetin %30 indirimli","email_body":"Merhaba {{first_name}},\n\nSepetin seni bekliyor."}`
-	audienceOK    = `{"rules":[{"field":"city","op":"eq","value":"istanbul"},{"field":"cart_added_days_ago","op":"lte","value":30}],"unsupported_criteria":[]}`
+	validTR    = `{"sms":"Merhaba {{first_name}}, sepetin seni bekliyor!","email_subject":"Sepetin %30 indirimli","email_body":"Merhaba {{first_name}},\n\nSepetin seni bekliyor."}`
+	validEN    = `{"sms":"Hi {{first_name}}, your cart is waiting!","email_subject":"30% off your cart","email_body":"Hi {{first_name}},\n\nYour cart is waiting."}`
+	audienceOK = `{"rules":[{"field":"city","op":"eq","value":"istanbul"},{"field":"cart_added_days_ago","op":"lte","value":30}],"unsupported_criteria":[]}`
 )
 
-var tooLongMessages = `{"sms":"Merhaba {{first_name}}, ` + strings.Repeat("çok uzun mesaj var ", 8) + `","email_subject":"Konu","email_body":"Gövde"}`
+// The scripted audiences have recipients in both languages, so a messages answer has both.
+var (
+	validMessages   = `{"tr":` + validTR + `,"en":` + validEN + `}`
+	tooLongMessages = `{"tr":{"sms":"Merhaba {{first_name}}, ` + strings.Repeat("çok uzun mesaj var ", 8) + `","email_subject":"Konu","email_body":"Gövde"},"en":` + validEN + `}`
+)
 
 type env struct {
 	t      *testing.T
@@ -206,16 +213,24 @@ func TestFullFlow(t *testing.T) {
 	if d := a["description"].([]any); d[0] != "lives in İstanbul" {
 		t.Errorf("description = %v", d)
 	}
+	langs := reach["languages"].(map[string]any)
+	if fmt.Sprint(a["content_languages"]) != "[tr en]" || langs["tr"].(map[string]any)["total"].(float64)+langs["en"].(map[string]any)["total"].(float64) != reach["total"] {
+		t.Errorf("languages = %v, reach = %v", a["content_languages"], reach)
+	}
 
 	status, evs, _ := e.stream(id, map[string]any{})
 	if status != 200 || evs[0].name != "delta" || names(evs)[len(names(evs))-1] != "validated" {
 		t.Fatalf("stream: %d %v", status, names(evs))
 	}
-	last := evs[len(evs)-1].data["content"].(map[string]any)
+	last := evs[len(evs)-1].data["contents"].(map[string]any)
 
 	c = e.get(id)
-	if c["status"] != "ready" || c["content"].(map[string]any)["sms"] != last["sms"] || c["content_errors"] != nil {
+	contents := c["contents"].(map[string]any)
+	if c["status"] != "ready" || contents["tr"].(map[string]any)["sms"] != last["tr"].(map[string]any)["sms"] || c["content_errors"] != nil {
 		t.Fatalf("after generation: %v", c)
+	}
+	if en := contents["en"].(map[string]any)["sms"].(string); !strings.HasPrefix(en, "Hi") {
+		t.Errorf("English SMS = %q", en)
 	}
 
 	calls := e.llmCalls(id)
@@ -292,7 +307,8 @@ func TestInvalidDraftIsStored(t *testing.T) {
 	}
 	c := e.get(id)
 	errs, _ := c["content_errors"].([]any)
-	if c["status"] != "draft" || c["content"] == nil || len(errs) != 1 || errs[0].(map[string]any)["code"] != "too_long" {
+	if c["status"] != "draft" || c["contents"] == nil || len(errs) != 1 || errs[0].(map[string]any)["code"] != "too_long" ||
+		errs[0].(map[string]any)["path"] != "tr.sms" {
 		t.Fatalf("campaign = %v", c)
 	}
 	calls := e.llmCalls(id)
@@ -310,28 +326,70 @@ func TestNewAudienceResetsDraft(t *testing.T) {
 	}
 	status, body := e.do("POST", path(id, "/audience"), map[string]string{"brief": llm.ExampleBriefEN})
 	c := body["campaign"].(map[string]any)
-	if status != 200 || c["status"] != "draft" || c["content"] != nil || c["brief"] != llm.ExampleBriefEN {
+	if status != 200 || c["status"] != "draft" || c["contents"] != nil || c["brief"] != llm.ExampleBriefEN {
 		t.Fatalf("after new audience: %d %v", status, c)
 	}
 }
 
 func TestGuidedRegeneration(t *testing.T) {
-	e := newEnv(t, llm.Scripted{Raw: audienceOK}, llm.Scripted{Raw: validMessages}, llm.Scripted{Raw: validMessages})
+	revisedEN := `{"sms":"Dear {{first_name}}, your cart is waiting.","email_subject":"Your cart","email_body":"Dear {{first_name}},\n\nYour cart is waiting."}`
+	e := newEnv(t, llm.Scripted{Raw: audienceOK}, llm.Scripted{Raw: validMessages}, llm.Scripted{Raw: `{"en":` + revisedEN + `}`})
 	id, _ := e.create("brief")
 	if status, _, errBody := e.stream(id, map[string]string{"feedback": "daha resmi"}); status != 422 || errCode(errBody) != "no_draft" {
 		t.Fatalf("feedback without draft: %d %v", status, errBody)
 	}
 	e.stream(id, map[string]any{})
-	if status, _, _ := e.stream(id, map[string]string{"feedback": "Daha resmi olsun"}); status != 200 {
-		t.Fatal(status)
+	before := e.get(id)["contents"].(map[string]any)
+
+	// Revise English only.
+	status, evs, _ := e.stream(id, map[string]any{"feedback": "More formal", "languages": []string{"en"}})
+	if status != 200 || names(evs)[len(names(evs))-1] != "validated" {
+		t.Fatalf("revise: %d %v", status, names(evs))
 	}
 	calls := e.mock.Calls()
-	sent := calls[len(calls)-1].Messages[0].Content
-	if !strings.Contains(sent, "Daha resmi olsun") || !strings.Contains(sent, "<previous_draft>") {
-		t.Errorf("regeneration request:\n%s", sent)
+	req := calls[len(calls)-1]
+	sent := req.Messages[0].Content
+	if !strings.Contains(sent, "More formal") || !strings.Contains(sent, "<previous_draft>") || !strings.Contains(sent, "<other_languages>") ||
+		string(req.Schema) != string(prompt.MessagesSchema([]string{"en"})) {
+		t.Errorf("regeneration request:\n%s\nschema %s", sent, req.Schema)
 	}
-	if status, _, errBody := e.stream(id, map[string]string{"feedback": strings.Repeat("a", 501)}); status != 422 || errCode(errBody) != "invalid_feedback" {
-		t.Errorf("long feedback: %d %v", status, errBody)
+	c := e.get(id)
+	after := c["contents"].(map[string]any)
+	if fmt.Sprint(after["tr"]) != fmt.Sprint(before["tr"]) || after["en"].(map[string]any)["email_subject"] != "Your cart" || c["status"] != "ready" {
+		t.Errorf("after revising English: %v", c)
+	}
+
+	for _, tc := range []struct {
+		body map[string]any
+		code string
+	}{
+		{map[string]any{"feedback": strings.Repeat("a", 501)}, "invalid_feedback"},
+		{map[string]any{"languages": []string{"de"}}, "invalid_language"},
+	} {
+		if status, _, errBody := e.stream(id, tc.body); status != 422 || errCode(errBody) != tc.code {
+			t.Errorf("%v: %d %v", tc.body, status, errBody)
+		}
+	}
+}
+
+// An audience with recipients in one language gets messages in that language only.
+func TestOneLanguageAudience(t *testing.T) {
+	e := newEnv(t, llm.Scripted{Raw: `{"rules":[{"field":"language","op":"eq","value":"en"}],"unsupported_criteria":[]}`},
+		llm.Scripted{Raw: `{"en":` + validEN + `}`})
+	id, body := e.create("English speakers")
+	a := body["campaign"].(map[string]any)["audience"].(map[string]any)
+	if fmt.Sprint(a["content_languages"]) != "[en]" {
+		t.Fatalf("languages = %v", a["content_languages"])
+	}
+	status, evs, _ := e.stream(id, map[string]any{})
+	if status != 200 || names(evs)[len(names(evs))-1] != "validated" {
+		t.Fatalf("stream: %d %v", status, names(evs))
+	}
+	if req := e.mock.Calls()[1]; string(req.Schema) != string(prompt.MessagesSchema([]string{"en"})) {
+		t.Errorf("schema = %s", req.Schema)
+	}
+	if c := e.get(id); c["status"] != "ready" || len(c["contents"].(map[string]any)) != 1 {
+		t.Errorf("campaign = %v", c)
 	}
 }
 
@@ -417,8 +475,8 @@ func TestBusyAndDisconnect(t *testing.T) {
 	if completed != 0 {
 		t.Errorf("%d messages answers completed after the disconnect", completed)
 	}
-	if c := e.get(id); c["content"] != nil {
-		t.Errorf("content stored after disconnect: %v", c["content"])
+	if c := e.get(id); c["contents"] != nil {
+		t.Errorf("content stored after disconnect: %v", c["contents"])
 	}
 }
 

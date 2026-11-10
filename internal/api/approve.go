@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/denizsahiner/smart-campaign-composer/internal/content"
-	"github.com/denizsahiner/smart-campaign-composer/internal/prompt"
 	"github.com/denizsahiner/smart-campaign-composer/internal/segment"
 	"github.com/denizsahiner/smart-campaign-composer/internal/store"
 	"github.com/denizsahiner/smart-campaign-composer/internal/validation"
@@ -21,9 +20,10 @@ func fieldErrors(err error) []validation.FieldError {
 }
 
 // refreshAudience recounts the stored segment for today, without calling Claude. It's
-// how a stale audience (counted on an earlier day) becomes approvable again. The draft
-// and the acknowledgement are kept; the draft is re-validated in case the longest name
-// in the audience grew.
+// how a stale audience (counted on an earlier day) becomes approvable again. The drafts
+// and the acknowledgement are kept; each draft is re-validated in case the longest name
+// among its language's recipients grew. A language that gained its first reachable
+// recipient has no draft yet and keeps the campaign a draft until one is written.
 func (s *Server) refreshAudience(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.campaign(w, r)
 	if !ok {
@@ -55,9 +55,10 @@ func (s *Server) refreshAudience(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var contentErrs []validation.FieldError
-	if c.Content != nil {
-		if _, verr := content.Validate(*c.Content, content.Options{LongestFirstName: counts.LongestFirstName}); verr != nil {
-			contentErrs = fieldErrors(verr)
+	for _, l := range c.Contents.Languages() {
+		opts := content.Options{LongestFirstName: counts.Languages[l].LongestFirstName}
+		if _, verr := content.Validate(c.Contents[l], opts); verr != nil {
+			contentErrs = append(contentErrs, content.Prefix(l, fieldErrors(verr))...)
 		}
 	}
 	if err := s.store.RefreshAudience(r.Context(), c.ID, counts, asOf, contentErrs); err != nil {
@@ -72,7 +73,9 @@ func (s *Server) refreshAudience(w http.ResponseWriter, r *http.Request) {
 }
 
 type approveRequest struct {
-	Content content.Content `json:"content"`
+	// Contents has the final draft of every language the audience needs; others are
+	// ignored.
+	Contents content.Set `json:"contents"`
 }
 
 type approveResponse struct {
@@ -80,8 +83,9 @@ type approveResponse struct {
 	Queued   store.Queued `json:"queued"`
 }
 
-// approve validates the final (possibly hand-edited) content with the same rules as the
-// model's draft and queues the messages. A draft from the messages step is not required:
+// approve validates the final (possibly hand-edited) content of each needed language with
+// the same rules as the model's draft and queues the messages, each recipient's in their
+// language. A draft from the messages step is not required:
 // the content is checked the same way whoever wrote it.
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.campaign(w, r)
@@ -109,7 +113,7 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 			"The audience was counted on an earlier day. Refresh it before approving.")
 		return
 	}
-	final, verr := content.Validate(req.Content, content.Options{LongestFirstName: c.Audience.Counts.LongestFirstName})
+	final, verr := content.ValidateSet(req.Contents, c.ContentOptions())
 	if verr != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_content", "The messages don't pass validation.", fieldErrors(verr)...)
 		return
@@ -125,14 +129,14 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.unlock(c.ID)
 
-	lang := c.ContentLanguage
-	if lang == "" {
-		lang = prompt.DefaultLanguage
-	}
-	queued, err := s.store.Approve(r.Context(), c.ID, final, lang, seg, c.Audience.AsOf)
+	queued, err := s.store.Approve(r.Context(), c.ID, final, seg, c.Audience.AsOf)
 	switch {
 	case errors.Is(err, store.ErrNotEditable):
 		writeError(w, http.StatusConflict, "already_approved", "The campaign has already been approved.")
+		return
+	case errors.Is(err, store.ErrMissingLanguage):
+		writeError(w, http.StatusConflict, "stale_audience",
+			"Some recipients prefer a language the messages aren't written in. Refresh the audience and write the missing language.")
 		return
 	case errors.Is(err, store.ErrNoRecipients):
 		writeError(w, http.StatusUnprocessableEntity, "empty_audience",

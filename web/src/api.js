@@ -39,7 +39,8 @@ export const api = {
   rerunAudience: (id, brief) => call('POST', `/api/campaigns/${id}/audience`, { brief }),
   acknowledge: (id) => call('POST', `/api/campaigns/${id}/acknowledge`),
   refreshAudience: (id) => call('POST', `/api/campaigns/${id}/audience/refresh`),
-  approve: (id, content) => call('POST', `/api/campaigns/${id}/approve`, { content }),
+  // contents: the final draft per language ({tr: {...}, en: {...}}).
+  approve: (id, contents) => call('POST', `/api/campaigns/${id}/approve`, { contents }),
   metrics: () => call('GET', '/api/metrics'),
   // Recipients the provider rejected for good, newest first: {failures, total, next_before}.
   failures: (id, params) => call('GET', `/api/campaigns/${id}/failures${query(params)}`),
@@ -91,12 +92,17 @@ export function watchDelivery(id, { onProgress, onDone, onError }) {
 }
 
 // Streams the messages step (Server-Sent Events over POST). onEvent gets {type, ...}.
-// Events: delta, retry, then one of validated | invalid | error.
-export async function generateMessages(id, feedback, onEvent, signal) {
+// Events: delta, retry, then one of validated | invalid | error; the last two carry
+// contents, keyed by language. languages: the languages to write (default: all the
+// audience needs); feedback: what to change in their current drafts.
+export async function generateMessages(id, { languages, feedback } = {}, onEvent, signal) {
+  const body = {}
+  if (languages?.length) body.languages = languages
+  if (feedback) body.feedback = feedback
   const res = await fetch(`/api/campaigns/${id}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ feedback: feedback || '' }),
+    body: JSON.stringify(body),
     signal,
   })
   if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => null))

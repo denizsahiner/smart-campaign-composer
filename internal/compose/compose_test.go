@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	validMessages = `{"sms":"Merhaba {{first_name}}, sepetin seni bekliyor!","email_subject":"Sepetin %30 indirimli","email_body":"Merhaba {{first_name}},\n\nSepetin seni bekliyor."}`
+	validMessages = `{"tr":{"sms":"Merhaba {{first_name}}, sepetin seni bekliyor!","email_subject":"Sepetin %30 indirimli","email_body":"Merhaba {{first_name}},\n\nSepetin seni bekliyor."}}`
 	validAudience = `{"rules":[{"field":"city","op":"eq","value":"istanbul"}],"unsupported_criteria":[]}`
 	campaignID    = 7
 )
@@ -24,7 +24,7 @@ const (
 var validator = segment.NewValidator([]string{"Ankara", "İstanbul"})
 
 // 24 + 8×19 = 176 characters rendered with a 15-character name.
-var tooLongMessages = `{"sms":"Merhaba {{first_name}}, ` + strings.Repeat("çok uzun mesaj var ", 8) + `","email_subject":"Konu","email_body":"Gövde"}`
+var tooLongMessages = `{"tr":{"sms":"Merhaba {{first_name}}, ` + strings.Repeat("çok uzun mesaj var ", 8) + `","email_subject":"Konu","email_body":"Gövde"}}`
 
 type recorder struct{ calls []Call }
 
@@ -75,7 +75,8 @@ func messagesInput(t *testing.T) prompt.MessagesInput {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return prompt.MessagesInput{Brief: "Sepeti terk edenlere %30 indirim.", Segment: a.Segment, LongestFirstName: 15}
+	return prompt.MessagesInput{Brief: "Sepeti terk edenlere %30 indirim.", Segment: a.Segment,
+		Languages: []prompt.Language{{Code: "tr", Recipients: 10, LongestFirstName: 15}}}
 }
 
 func busy(status int, retryAfter time.Duration) llm.Scripted {
@@ -85,7 +86,7 @@ func busy(status int, retryAfter time.Duration) llm.Scripted {
 func TestMessagesHappyPath(t *testing.T) {
 	h := newHarness(llm.Scripted{Raw: validMessages})
 	res, err := h.c.Messages(t.Context(), campaignID, messagesInput(t), h.emit)
-	if err != nil || !res.Valid || res.Content.SMS != "Merhaba {{first_name}}, sepetin seni bekliyor!" {
+	if err != nil || !res.Valid || res.Contents["tr"].SMS != "Merhaba {{first_name}}, sepetin seni bekliyor!" {
 		t.Fatalf("res = %+v, err = %v", res, err)
 	}
 	var streamed strings.Builder
@@ -149,14 +150,14 @@ func TestMessagesExhaustedGivesEditableDraft(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v, want an editable draft", err)
 	}
-	if res.Valid || res.Content.EmailSubject != "Konu" || len(res.Errors) != 1 || res.Errors[0].Code != content.CodeTooLong {
+	if res.Valid || res.Contents["tr"].EmailSubject != "Konu" || len(res.Errors) != 1 || res.Errors[0].Code != content.CodeTooLong {
 		t.Fatalf("res = %+v", res)
 	}
 	if got := h.eventTypes(); !slices.Equal(got, []string{"retry:invalid", "retry:invalid", "invalid"}) {
 		t.Errorf("events = %v", got)
 	}
 	last := h.events[len(h.events)-1]
-	if last.Content == nil || last.Content.EmailBody != "Gövde" || len(last.Errors) != 1 {
+	if last.Contents == nil || last.Contents["tr"].EmailBody != "Gövde" || len(last.Errors) != 1 {
 		t.Errorf("invalid event = %+v", last)
 	}
 	if h.mock.Remaining() != 0 || len(h.mock.Calls()) != 3 {
@@ -312,7 +313,7 @@ func TestCancelDuringBackoff(t *testing.T) {
 func TestGuidedRegeneration(t *testing.T) {
 	h := newHarness(llm.Scripted{Raw: validMessages})
 	in := messagesInput(t)
-	in.Previous = &content.Content{SMS: "Eski SMS", EmailSubject: "Eski konu", EmailBody: "Eski gövde"}
+	in.Current = content.Set{"tr": {SMS: "Eski SMS", EmailSubject: "Eski konu", EmailBody: "Eski gövde"}}
 	in.Feedback = "Daha resmi olsun"
 	if _, err := h.c.Messages(t.Context(), campaignID, in, h.emit); err != nil {
 		t.Fatal(err)
@@ -374,7 +375,8 @@ func TestWithFixtureMock(t *testing.T) {
 	if err != nil || len(a.Segment.Rules) != 3 {
 		t.Fatalf("audience = %+v, %v", a, err)
 	}
-	res, err := c.Messages(t.Context(), 1, prompt.MessagesInput{Brief: llm.ExampleBriefTR, Segment: a.Segment, LongestFirstName: 15}, nil)
+	res, err := c.Messages(t.Context(), 1, prompt.MessagesInput{Brief: llm.ExampleBriefTR, Segment: a.Segment,
+		Languages: []prompt.Language{{Code: "tr", Recipients: 10, LongestFirstName: 15}}}, nil)
 	if err != nil || !res.Valid {
 		t.Fatalf("messages = %+v, %v", res, err)
 	}

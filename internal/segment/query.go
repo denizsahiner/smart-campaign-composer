@@ -81,28 +81,56 @@ func Build(s Segment, asOf time.Time, args []any) (string, []any, error) {
 	return strings.Join(conds, " AND "), args, nil
 }
 
-// Counts is the reach of a segment: everyone matching it, and those reachable per channel.
+// Counts is the reach of a segment: everyone matching it, and those reachable per channel,
+// in total and per preferred language (users.language).
 type Counts struct {
 	Total int `json:"total"`
 	SMS   int `json:"sms"`
 	Email int `json:"email"`
-	// LongestFirstName is the longest first_name in the segment, in characters; content
-	// length limits are checked against it (content.Options).
+	// LongestFirstName is the longest first_name in the segment, in characters.
+	LongestFirstName int `json:"longest_first_name"`
+	// Languages has an entry for each language with anyone in the segment. Content is
+	// written per language and its length limits are checked against that language's
+	// LongestFirstName (content.Options).
+	Languages map[string]LanguageCounts `json:"languages"`
+}
+
+// LanguageCounts is the part of a segment that prefers one language.
+type LanguageCounts struct {
+	Total            int `json:"total"`
+	SMS              int `json:"sms"`
+	Email            int `json:"email"`
 	LongestFirstName int `json:"longest_first_name"`
 }
 
-// CountSQL returns one query that computes Counts in a single pass over the segment.
+// Reachable reports whether anyone in this part can be reached on some channel.
+func (l LanguageCounts) Reachable() bool { return l.SMS+l.Email > 0 }
+
+// ContentLanguages are the languages messages have to be written in: those with at
+// least one reachable recipient, in the order of Languages.
+func (c Counts) ContentLanguages() []string {
+	var out []string
+	for _, l := range Languages {
+		if c.Languages[l].Reachable() {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// CountSQL returns one query that computes the reach per language in a single pass over
+// the segment: one row per language with anyone in it.
 func CountSQL(s Segment, asOf time.Time) (string, []any, error) {
 	where, args, err := Build(s, asOf, nil)
 	if err != nil {
 		return "", nil, err
 	}
-	q := "SELECT count(*), " +
+	q := "SELECT u.language, count(*), " +
 		"count(*) FILTER (WHERE " + SMSReachable + "), " +
 		"count(*) FILTER (WHERE " + EmailReachable + "), " +
 		// char_length counts characters like utf8.RuneCountInString, not bytes.
 		"coalesce(max(char_length(u.first_name)), 0) " +
-		"FROM users u WHERE " + where
+		"FROM users u WHERE " + where + " GROUP BY u.language"
 	return q, args, nil
 }
 
@@ -118,8 +146,25 @@ func Count(ctx context.Context, db Querier, s Segment, asOf time.Time) (Counts, 
 	if err != nil {
 		return Counts{}, err
 	}
-	var c Counts
-	if err := db.QueryRow(ctx, q, args...).Scan(&c.Total, &c.SMS, &c.Email, &c.LongestFirstName); err != nil {
+	rows, err := db.Query(ctx, q, args...)
+	if err != nil {
+		return Counts{}, fmt.Errorf("count segment: %w", err)
+	}
+	defer rows.Close()
+	c := Counts{Languages: map[string]LanguageCounts{}}
+	for rows.Next() {
+		var lang string
+		var l LanguageCounts
+		if err := rows.Scan(&lang, &l.Total, &l.SMS, &l.Email, &l.LongestFirstName); err != nil {
+			return Counts{}, fmt.Errorf("count segment: %w", err)
+		}
+		c.Languages[lang] = l
+		c.Total += l.Total
+		c.SMS += l.SMS
+		c.Email += l.Email
+		c.LongestFirstName = max(c.LongestFirstName, l.LongestFirstName)
+	}
+	if err := rows.Err(); err != nil {
 		return Counts{}, fmt.Errorf("count segment: %w", err)
 	}
 	return c, nil

@@ -82,18 +82,18 @@ describe('logged problems', () => {
 describe('character counting', () => {
   it('counts {{first_name}} as the longest name in the audience', async () => {
     // "Merhaba " (8) + 10 for the name + "!" (1) = 19
-    const { w } = await open(campaign({ content: { ...GOOD, sms: 'Merhaba {{first_name}}!' } }))
+    const { w } = await open(campaign({ contents: { tr: { ...GOOD, sms: 'Merhaba {{first_name}}!' } } }))
     expect(w.findAll('.counter')[0].text()).toBe('19 / 160')
   })
 
   it('counts characters, not bytes or UTF-16 units', async () => {
     // "ğüşİ" is 4 characters (8 bytes); "🎉" is 1 character (2 UTF-16 units).
-    const { w } = await open(campaign({ content: { ...GOOD, email_subject: 'ğüşİ🎉' } }))
+    const { w } = await open(campaign({ contents: { tr: { ...GOOD, email_subject: 'ğüşİ🎉' } } }))
     expect(w.findAll('.counter')[1].text()).toBe('5 / 80')
   })
 
   it('updates as the marketer types', async () => {
-    const { w } = await open(campaign({ content: GOOD }))
+    const { w } = await open(campaign({ contents: { tr: GOOD } }))
     await w.find('textarea[rows="3"]').setValue('x'.repeat(161))
     expect(w.findAll('.counter')[0].text()).toBe('161 / 160')
     expect(w.findAll('.counter')[0].classes()).toContain('over')
@@ -105,10 +105,10 @@ describe('approval rules', () => {
 
   it.each([
     ['without a draft', {}, 'Önce mesajları üretin.'],
-    ['with unacknowledged criteria', { content: GOOD, audience: { unsupported_criteria: ['VIP müşteriler'] } }, 'Önce eksik kriterleri onaylayın.'],
-    ['with a stale audience', { content: GOOD, audience: { as_of: yesterday } }, 'Önce kitleyi yenileyin.'],
-    ['with an SMS over 160 once the name is in', { content: { ...GOOD, sms: 'x'.repeat(151) + '{{first_name}}' } }, 'Bir mesaj karakter sınırını aşıyor.'],
-    ['with an empty field', { content: { ...GOOD, email_body: '   ' } }, 'Tüm mesajları doldurun.'],
+    ['with unacknowledged criteria', { contents: { tr: GOOD }, audience: { unsupported_criteria: ['VIP müşteriler'] } }, 'Önce eksik kriterleri onaylayın.'],
+    ['with a stale audience', { contents: { tr: GOOD }, audience: { as_of: yesterday } }, 'Önce kitleyi yenileyin.'],
+    ['with an SMS over 160 once the name is in', { contents: { tr: { ...GOOD, sms: 'x'.repeat(151) + '{{first_name}}' } } }, 'Bir mesaj karakter sınırını aşıyor.'],
+    ['with an empty field', { contents: { tr: { ...GOOD, email_body: '   ' } } }, 'Tüm mesajları doldurun.'],
   ])('is blocked %s', async (_, overrides, reason) => {
     const { w } = await open(campaign(overrides))
     expect(approveButton(w).attributes('disabled')).toBeDefined()
@@ -116,24 +116,24 @@ describe('approval rules', () => {
   })
 
   it('checks the blockers in order: acknowledgement before staleness', async () => {
-    const { w } = await open(campaign({ content: GOOD, audience: { unsupported_criteria: ['VIP'], as_of: yesterday } }))
+    const { w } = await open(campaign({ contents: { tr: GOOD }, audience: { unsupported_criteria: ['VIP'], as_of: yesterday } }))
     expect(blocker(w)).toBe('Önce eksik kriterleri onaylayın.')
   })
 
   it('allows approval when everything passes', async () => {
-    const { w } = await open(campaign({ content: GOOD }))
+    const { w } = await open(campaign({ contents: { tr: GOOD } }))
     expect(approveButton(w).attributes('disabled')).toBeUndefined()
     expect(blocker(w)).toBeUndefined()
   })
 
   it('accepts acknowledged criteria', async () => {
-    const { w } = await open(campaign({ content: GOOD, audience: { unsupported_criteria: ['VIP'], unsupported_acknowledged: true } }))
+    const { w } = await open(campaign({ contents: { tr: GOOD }, audience: { unsupported_criteria: ['VIP'], unsupported_acknowledged: true } }))
     expect(approveButton(w).attributes('disabled')).toBeUndefined()
     expect(w.text()).toContain('Hedef kitleye dahil edilmeyenler: VIP')
   })
 
   it('hides approval once the campaign is approved', async () => {
-    const { w } = await open(campaign({ content: GOOD, status: 'approved', approved_at: new Date().toISOString() }))
+    const { w } = await open(campaign({ contents: { tr: GOOD }, status: 'approved', approved_at: new Date().toISOString() }))
     expect(approveButton(w)).toBeUndefined()
     expect(w.find('textarea[rows="3"]').attributes('readonly')).toBeDefined()
   })
@@ -152,8 +152,8 @@ describe('audience actions', () => {
   })
 
   it('refreshes a stale audience', async () => {
-    const stale = campaign({ content: GOOD, audience: { as_of: '2020-01-01T09:00:00Z' } })
-    const { w, calls } = await open(stale, { 'POST /api/campaigns/7/audience/refresh': () => jsonResponse(200, campaign({ content: GOOD })) })
+    const stale = campaign({ contents: { tr: GOOD }, audience: { as_of: '2020-01-01T09:00:00Z' } })
+    const { w, calls } = await open(stale, { 'POST /api/campaigns/7/audience/refresh': () => jsonResponse(200, campaign({ contents: { tr: GOOD } })) })
     await button(w, 'Kitleyi yenile').trigger('click')
     await flushPromises()
     expect(lastAction(calls).key).toBe('POST /api/campaigns/7/audience/refresh')
@@ -182,7 +182,7 @@ describe('audience actions', () => {
 describe('message generation', () => {
   it('streams a draft, then shows it as editable fields', async () => {
     const { w } = await open(campaign(), {
-      'POST /api/campaigns/7/messages': () => sseResponse([sse('delta', { delta: '{"sms":' }), sse('validated', { content: GOOD })]),
+      'POST /api/campaigns/7/messages': () => sseResponse([sse('delta', { delta: '{"sms":' }), sse('validated', { contents: { tr: GOOD } })]),
     })
     await button(w, 'Mesaj öner').trigger('click')
     await flushPromises()
@@ -196,7 +196,7 @@ describe('message generation', () => {
     const { w } = await open(campaign(), {
       'POST /api/campaigns/7/messages': () => sseResponse([
         sse('retry', { reason: 'invalid', errors: [] }),
-        sse('invalid', { content: bad, errors: [{ path: 'sms', code: 'too_long', message: 'SMS is 170 characters; the limit is 160.' }] }),
+        sse('invalid', { contents: { tr: bad }, errors: [{ path: 'tr.sms', code: 'too_long', message: 'SMS is 170 characters; the limit is 160.' }] }),
       ]),
     })
     await button(w, 'Mesaj öner').trigger('click')
@@ -208,14 +208,14 @@ describe('message generation', () => {
   })
 
   it('sends feedback when revising and clears it afterwards', async () => {
-    const { w, calls } = await open(campaign({ content: GOOD }), {
-      'POST /api/campaigns/7/messages': () => sseResponse([sse('validated', { content: { ...GOOD, sms: 'Daha resmi' } })]),
+    const { w, calls } = await open(campaign({ contents: { tr: GOOD } }), {
+      'POST /api/campaigns/7/messages': () => sseResponse([sse('validated', { contents: { tr: { ...GOOD, sms: 'Daha resmi' } } })]),
     })
     expect(button(w, 'Revize et').attributes('disabled')).toBeDefined() // no feedback yet
     await w.find('input.feedback').setValue('daha resmi')
     await button(w, 'Revize et').trigger('click')
     await flushPromises()
-    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/messages', body: { feedback: 'daha resmi' } })
+    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/messages', body: { feedback: 'daha resmi', languages: ['tr'] } })
     expect(w.find('textarea[rows="3"]').element.value).toBe('Daha resmi')
     expect(w.find('input.feedback').element.value).toBe('')
   })
@@ -241,10 +241,10 @@ describe('message generation', () => {
 })
 
 describe('approval', () => {
-  const approved = () => campaign({ content: GOOD, status: 'approved', approved_at: new Date().toISOString() })
+  const approved = () => campaign({ contents: { tr: GOOD }, status: 'approved', approved_at: new Date().toISOString() })
 
   it('sends the edited content, shows what was queued and starts following delivery', async () => {
-    const { w, calls } = await open(campaign({ content: GOOD }), {
+    const { w, calls } = await open(campaign({ contents: { tr: GOOD } }), {
       'POST /api/campaigns/7/approve': () => jsonResponse(200, {
         campaign: approved(),
         queued: { sms: 900, email: 1000, without_name: { sms: 3, email: 0 } },
@@ -254,7 +254,7 @@ describe('approval', () => {
     await approveButton(w).trigger('click')
     await flushPromises()
 
-    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/approve', body: { content: { ...GOOD, sms: 'Elle düzenlendi {{first_name}}' } } })
+    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/approve', body: { contents: { tr: { ...GOOD, sms: 'Elle düzenlendi {{first_name}}' } } } })
     expect(w.text()).toContain('Kuyruğa alındı: 900 SMS ve 1.000 e-posta.')
     expect(w.text()).toContain('3 SMS ve 0 e-posta isimsiz gider')
     expect(approveButton(w)).toBeUndefined()
@@ -263,7 +263,7 @@ describe('approval', () => {
   })
 
   it('shows the field errors the backend rejects the content with', async () => {
-    const { w } = await open(campaign({ content: GOOD }), {
+    const { w } = await open(campaign({ contents: { tr: GOOD } }), {
       'POST /api/campaigns/7/approve': () => jsonResponse(422, {
         error: { code: 'invalid_content', message: "The messages don't pass validation.", errors: [{ path: 'email_body', code: 'unknown_placeholder', message: 'Unknown placeholder {{city}}.' }] },
       }),
@@ -287,7 +287,7 @@ describe('approval', () => {
 
     total = 2
     mockFetch({
-      'GET /api/campaigns/7': () => jsonResponse(200, campaign({ content: GOOD, status: 'completed' })),
+      'GET /api/campaigns/7': () => jsonResponse(200, campaign({ contents: { tr: GOOD }, status: 'completed' })),
       [SUMMARY]: () => jsonResponse(200, { errors: 2, warnings: 0 }),
       [FAILURES]: () => jsonResponse(200, { failures: [failure(1), failure(2)], total, next_before: null }),
     })
@@ -297,7 +297,7 @@ describe('approval', () => {
   })
 
   it('shows no failed recipients section before approval', async () => {
-    const { w, calls } = await open(campaign({ content: GOOD }))
+    const { w, calls } = await open(campaign({ contents: { tr: GOOD } }))
     expect(w.text()).not.toContain('Gönderilemeyen alıcılar')
     expect(calls.map((x) => x.key)).not.toContain(FAILURES)
   })
@@ -305,9 +305,119 @@ describe('approval', () => {
   it('reloads the campaign when delivery is done', async () => {
     const { w } = await open(approved())
     expect(w.find('.badge').text()).toBe('Onaylandı')
-    mockFetch({ 'GET /api/campaigns/7': () => jsonResponse(200, campaign({ content: GOOD, status: 'completed' })) })
+    mockFetch({ 'GET /api/campaigns/7': () => jsonResponse(200, campaign({ contents: { tr: GOOD }, status: 'completed' })) })
     FakeEventSource.last().emit('done', { campaign_id: 7, status: 'completed', channels: { sms: {}, email: {} }, total: { sms: 0, email: 0 }, rate_per_second: {} })
     await flushPromises()
     expect(w.find('.badge').text()).toBe('Tamamlandı')
+  })
+})
+
+describe('languages', () => {
+  const EN = { sms: 'Hi {{first_name}}, your cart is waiting!', email_subject: '30% off', email_body: 'Your items are still there.' }
+  const bilingual = (overrides = {}) => campaign({
+    audience: {
+      content_languages: ['tr', 'en'],
+      reach: {
+        total: 1200, sms: 900, email: 1000, longest_first_name: 10,
+        languages: { tr: { total: 1000, sms: 750, email: 830, longest_first_name: 10 }, en: { total: 200, sms: 150, email: 170, longest_first_name: 4 } },
+      },
+    },
+    ...overrides,
+  })
+  const tabs = (w) => w.findAll('[role="tab"]')
+  const tab = (w, name) => tabs(w).find((t) => t.text().startsWith(name))
+  const sms = (w) => w.find('textarea[rows="3"]').element.value
+
+  it('shows a tab per language with its recipients, and each draft in its tab', async () => {
+    const { w } = await open(bilingual({ contents: { tr: GOOD, en: EN } }))
+    expect(tabs(w).map((t) => t.text())).toEqual(['Türkçe · 1.000 kişi', 'English · 200 kişi'])
+    expect(sms(w)).toBe(GOOD.sms)
+    await tab(w, 'English').trigger('click')
+    expect(sms(w)).toBe(EN.sms)
+    expect(w.text()).toContain('en uzun adına (4 karakter)')
+  })
+
+  it("counts {{first_name}} with the tab's own longest name", async () => {
+    const { w } = await open(bilingual({ contents: { tr: { ...GOOD, sms: '{{first_name}}' }, en: { ...EN, sms: '{{first_name}}' } } }))
+    expect(w.findAll('.counter')[0].text()).toBe('10 / 160')
+    await tab(w, 'English').trigger('click')
+    expect(w.findAll('.counter')[0].text()).toBe('4 / 160')
+  })
+
+  it('marks the tab with a problem and blocks approval', async () => {
+    const { w } = await open(bilingual({ contents: { tr: GOOD, en: { ...EN, sms: 'x'.repeat(161) } } }))
+    expect(tab(w, 'Türkçe').find('.warn-mark').exists()).toBe(false)
+    expect(tab(w, 'English').find('.warn-mark').exists()).toBe(true)
+    expect(blocker(w)).toBe('Bir mesaj karakter sınırını aşıyor.')
+  })
+
+  it('shows field errors on their own tab only', async () => {
+    const { w } = await open(bilingual({
+      status: 'draft',
+      contents: { tr: GOOD, en: EN },
+      content_errors: [{ path: 'en.email_body', code: 'unknown_placeholder', message: 'unknown placeholder {{city}}' }],
+    }))
+    expect(w.text()).not.toContain('unknown placeholder')
+    await tab(w, 'English').trigger('click')
+    expect(w.text()).toContain('email_body: unknown placeholder {{city}}')
+    expect(tab(w, 'English').find('.warn-mark').exists()).toBe(true)
+  })
+
+  it('revises only the selected languages and keeps edits in the others', async () => {
+    const { w, calls } = await open(bilingual({ contents: { tr: GOOD, en: EN } }), {
+      'POST /api/campaigns/7/messages': () => sseResponse([sse('validated', { contents: { en: { ...EN, sms: 'Dear {{first_name}}' } } })]),
+    })
+    await w.find('textarea[rows="3"]').setValue('Elle düzenlendi')
+    const boxes = w.findAll('.pick input')
+    expect(boxes.map((b) => b.element.checked)).toEqual([true, true])
+    await boxes[0].setValue(false) // not Turkish
+    await w.find('input.feedback').setValue('more formal')
+    await button(w, 'Revize et').trigger('click')
+    await flushPromises()
+    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/messages', body: { feedback: 'more formal', languages: ['en'] } })
+    expect(sms(w)).toBe('Elle düzenlendi')
+    await tab(w, 'English').trigger('click')
+    expect(sms(w)).toBe('Dear {{first_name}}')
+  })
+
+  it('cannot revise with no language selected', async () => {
+    const { w } = await open(bilingual({ contents: { tr: GOOD, en: EN } }))
+    await w.find('input.feedback').setValue('more formal')
+    for (const b of w.findAll('.pick input')) await b.setValue(false)
+    expect(button(w, 'Revize et').attributes('disabled')).toBeDefined()
+  })
+
+  it('offers to write a language that has no draft yet, and blocks approval until then', async () => {
+    const { w, calls } = await open(bilingual({ status: 'draft', contents: { tr: GOOD } }), {
+      'POST /api/campaigns/7/messages': () => sseResponse([sse('validated', { contents: { en: EN } })]),
+    })
+    expect(blocker(w)).toBe('Önce English mesajlarını yazın.')
+    expect(tab(w, 'English').find('.warn-mark').exists()).toBe(true)
+    await tab(w, 'English').trigger('click')
+    expect(w.text()).toContain('Bu dilde henüz mesaj yok.')
+    await button(w, 'English yaz').trigger('click')
+    await flushPromises()
+    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/messages', body: { languages: ['en'] } })
+    expect(sms(w)).toBe(EN.sms)
+    expect(approveButton(w).attributes('disabled')).toBeUndefined()
+  })
+
+  it('approves with every language', async () => {
+    const { w, calls } = await open(bilingual({ contents: { tr: GOOD, en: EN } }), {
+      'POST /api/campaigns/7/approve': () => jsonResponse(200, {
+        campaign: bilingual({ contents: { tr: GOOD, en: EN }, status: 'approved', approved_at: new Date().toISOString() }),
+        queued: { sms: 900, email: 1000, without_name: { sms: 0, email: 0 }, by_language: { tr: 1000, en: 200 } },
+      }),
+    })
+    await approveButton(w).trigger('click')
+    await flushPromises()
+    expect(lastAction(calls).body).toEqual({ contents: { tr: GOOD, en: EN } })
+    expect(w.text()).toContain('(Türkçe: 1.000 kişi, English: 200 kişi)')
+  })
+
+  it('has no language picker for a one-language audience', async () => {
+    const { w } = await open(campaign({ contents: { tr: GOOD } }))
+    expect(w.find('.pick').exists()).toBe(false)
+    expect(tabs(w).map((t) => t.text())).toEqual(['Türkçe · 1.200 kişi'])
   })
 })

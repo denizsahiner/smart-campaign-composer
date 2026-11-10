@@ -66,20 +66,20 @@ describe('api calls', () => {
 })
 
 describe('generateMessages (SSE over POST)', () => {
-  const content = { sms: 'Merhaba {{first_name}}', email_subject: 'İndirim', email_body: 'Gövde' }
+  const contents = { tr: { sms: 'Merhaba {{first_name}}', email_subject: 'İndirim', email_body: 'Gövde' } }
 
   async function collect(chunks) {
     const calls = mockFetch({ 'POST /api/campaigns/7/messages': () => sseResponse(chunks) })
     const events = []
-    await generateMessages(7, 'daha kısa', (e) => events.push(e))
+    await generateMessages(7, { feedback: 'daha kısa', languages: ['tr'] }, (e) => events.push(e))
     return { events, calls }
   }
 
   it('sends the feedback and delivers events in order', async () => {
-    const { events, calls } = await collect([sse('delta', { delta: '{"sms"' }), sse('delta', { delta: ':"x"}' }), sse('validated', { content })])
-    expect(calls[0].body).toEqual({ feedback: 'daha kısa' })
+    const { events, calls } = await collect([sse('delta', { delta: '{"sms"' }), sse('delta', { delta: ':"x"}' }), sse('validated', { contents })])
+    expect(calls[0].body).toEqual({ feedback: 'daha kısa', languages: ['tr'] })
     expect(events.map((e) => e.type)).toEqual(['delta', 'delta', 'validated'])
-    expect(events[2].content).toEqual(content)
+    expect(events[2].contents).toEqual(contents)
   })
 
   it('reassembles an event split across reads, even inside a multi-byte character', async () => {
@@ -92,14 +92,14 @@ describe('generateMessages (SSE over POST)', () => {
       })),
     })
     const events = []
-    await generateMessages(7, '', (e) => events.push(e))
+    await generateMessages(7, {}, (e) => events.push(e))
     expect(events).toEqual([{ type: 'delta', delta: 'Şişli' }])
   })
 
   it('handles several events in one read and an event split at the separator', async () => {
     const a = sse('delta', { delta: 'a' })
     const b = sse('retry', { reason: 'invalid', errors: [{ path: 'sms', code: 'too_long', message: 'x' }] })
-    const c = sse('invalid', { content, errors: [] })
+    const c = sse('invalid', { contents, errors: [] })
     const { events } = await collect([a + b.slice(0, -1), b.slice(-1) + c])
     expect(events.map((e) => e.type)).toEqual(['delta', 'retry', 'invalid'])
     expect(events[1].reason).toBe('invalid')
@@ -110,16 +110,17 @@ describe('generateMessages (SSE over POST)', () => {
     expect(events).toEqual([{ type: 'error', message: 'Claude is busy' }])
   })
 
-  it('sends an empty feedback when none is given', async () => {
+  it('leaves out empty options', async () => {
     const calls = mockFetch({ 'POST /api/campaigns/7/messages': () => sseResponse([]) })
     await generateMessages(7, undefined, () => {})
-    expect(calls[0].body).toEqual({ feedback: '' })
+    await generateMessages(7, { feedback: '', languages: [] }, () => {})
+    expect(calls.map((c) => c.body)).toEqual([{}, {}])
   })
 
   it('throws ApiError when a precondition fails before the stream starts', async () => {
     mockFetch({ 'POST /api/campaigns/7/messages': () => jsonResponse(409, { error: { code: 'busy', message: 'Claude is already working on this campaign.' } }) })
     const onEvent = vi.fn()
-    const err = await generateMessages(7, '', onEvent).catch((e) => e)
+    const err = await generateMessages(7, {}, onEvent).catch((e) => e)
     expect(err).toBeInstanceOf(ApiError)
     expect(err.code).toBe('busy')
     expect(onEvent).not.toHaveBeenCalled()

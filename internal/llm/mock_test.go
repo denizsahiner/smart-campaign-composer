@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -11,6 +12,12 @@ import (
 
 func userReq(step Step, brief string) Request {
 	return Request{Step: step, Messages: []Message{{Role: RoleUser, Content: "Brief:\n" + brief}}}
+}
+
+func messagesReq(brief string, langs ...string) Request {
+	r := userReq(StepMessages, brief)
+	r.Schema, _ = json.Marshal(map[string]any{"required": langs})
+	return r
 }
 
 func TestMockFixtureByBrief(t *testing.T) {
@@ -23,13 +30,17 @@ func TestMockFixtureByBrief(t *testing.T) {
 	if err != nil || string(res.Raw) != exampleAudience {
 		t.Fatalf("audience = %s, %v", res.Raw, err)
 	}
-	res, err = m.Generate(ctx, userReq(StepMessages, ExampleBriefTR))
-	if err != nil || !strings.Contains(string(res.Raw), "Merhaba") {
+	res, err = m.Generate(ctx, messagesReq(ExampleBriefTR, "tr"))
+	if err != nil || !strings.HasPrefix(string(res.Raw), `{"tr":{"sms":"Merhaba`) || strings.Contains(string(res.Raw), `"en"`) {
 		t.Fatalf("TR messages = %s, %v", res.Raw, err)
 	}
-	res, err = m.Generate(ctx, userReq(StepMessages, ExampleBriefEN))
-	if err != nil || !strings.Contains(string(res.Raw), "sepetin seni bekliyor") {
+	// The languages come from the schema, in its order, whatever the brief's language.
+	res, err = m.Generate(ctx, messagesReq(ExampleBriefEN, "en", "tr"))
+	if err != nil || !strings.HasPrefix(string(res.Raw), `{"en":{"sms":"Hi`) || !strings.Contains(string(res.Raw), "sepetin seni bekliyor") {
 		t.Fatalf("EN brief messages = %s, %v", res.Raw, err)
+	}
+	if _, err := m.Generate(ctx, userReq(StepMessages, ExampleBriefEN)); err == nil {
+		t.Fatal("messages without a schema: want error")
 	}
 	res, err = m.Generate(ctx, userReq(StepAudience, "something else entirely"))
 	if err != nil || string(res.Raw) != defaultFixture.Audience {
@@ -120,7 +131,7 @@ func TestMockStreamHonorsCancel(t *testing.T) {
 	m.ChunkRunes, m.ChunkDelay = 1, 50*time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	req := userReq(StepMessages, ExampleBriefEN)
+	req := messagesReq(ExampleBriefEN, "tr")
 	req.OnDelta = func(string) {}
 	if _, err := m.Generate(ctx, req); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want DeadlineExceeded", err)

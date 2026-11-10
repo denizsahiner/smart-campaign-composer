@@ -52,36 +52,56 @@
     <section v-if="c.audience" class="section">
       <div class="row spread">
         <h2 class="heading">Mesajlar</h2>
-        <div v-if="editable && !needsAck" class="row">
-          <input v-if="draft" v-model="feedback" class="field feedback" placeholder="Daha resmi, daha kısa…" maxlength="500" />
-          <BaseButton variant="secondary" :disabled="generating || (draft && !feedback.trim())" :loading="generating" @click="generate">
-            {{ draft ? 'Revize et' : 'Mesaj öner' }}
-          </BaseButton>
+        <div v-if="editable && !needsAck && langs.length" class="row">
+          <template v-if="hasDrafts">
+            <fieldset v-if="langs.length > 1" class="pick row" aria-label="Revize edilecek diller">
+              <label v-for="l in langs" :key="l" class="small">
+                <input v-model="selected" type="checkbox" :value="l" :disabled="!drafts[l]" /> {{ LANG_NAMES[l] }}
+              </label>
+            </fieldset>
+            <input v-model="feedback" class="field feedback" placeholder="Daha resmi, daha kısa…" maxlength="500" />
+            <BaseButton variant="secondary" :disabled="generating || !feedback.trim() || !revisable.length" :loading="generating" @click="revise">Revize et</BaseButton>
+          </template>
+          <BaseButton v-else variant="secondary" :disabled="generating" :loading="generating" @click="generate()">Mesaj öner</BaseButton>
         </div>
       </div>
+      <p v-if="langs.length > 1" class="small muted">Her alıcıya kendi dilindeki mesaj gider. Brief'i istediğiniz dilde yazabilirsiniz.</p>
 
       <p v-if="streamNote" class="small muted">{{ streamNote }}</p>
       <pre v-if="generating && streamText" class="stream code">{{ streamText }}</pre>
       <p v-if="messageError" class="notice error">{{ messageError }}</p>
 
-      <template v-if="draft && !generating">
-        <p v-if="fieldErrors.length" class="notice warn">
-          Bu taslak henüz doğrulamadan geçmiyor. Aşağıda düzeltin:
-          <span v-for="e in fieldErrors" :key="e.path + e.code" class="block">{{ e.path }}: {{ e.message }}</span>
-        </p>
-        <div class="msg">
-          <div class="row spread"><span class="label sms-c">SMS</span><ChannelCounter :used="len(draft.sms)" :limit="160" /></div>
-          <textarea v-model="draft.sms" class="field" rows="3" :readonly="!editable" />
+      <template v-if="hasDrafts && !generating">
+        <div v-if="langs.length" class="tabs row" role="tablist">
+          <button v-for="l in langs" :key="l" type="button" role="tab" class="tab" :class="{ active: l === tab }"
+            :aria-selected="l === tab" @click="tab = l">
+            {{ LANG_NAMES[l] }} · {{ fmt(c.audience.reach.languages?.[l]?.total ?? c.audience.reach.total) }} kişi
+            <span v-if="problem(l)" class="warn-mark" title="Bu dilde düzeltilmesi gereken bir şey var">⚠</span>
+          </button>
         </div>
-        <div class="msg">
-          <div class="row spread"><span class="label email-c">E-posta konusu</span><ChannelCounter :used="len(draft.email_subject)" :limit="80" /></div>
-          <input v-model="draft.email_subject" class="field" :readonly="!editable" />
+        <div v-if="!drafts[tab]" class="notice warn row spread">
+          <span>Bu dilde henüz mesaj yok.</span>
+          <BaseButton v-if="editable" variant="secondary" @click="generate({ languages: missing })">{{ missingLabel }} yaz</BaseButton>
         </div>
-        <div class="msg">
-          <span class="label email-c">E-posta gövdesi</span>
-          <textarea v-model="draft.email_body" class="field" rows="8" :readonly="!editable" />
-        </div>
-        <p class="small muted">Kişiselleştirmek için <code class="code">{{ PLACEHOLDER }}</code> kullanın. Sınırlar, kitledeki en uzun ada ({{ c.audience.reach.longest_first_name }} karakter) göre kontrol edilir.</p>
+        <template v-else>
+          <p v-if="tabErrors.length" class="notice warn">
+            Bu taslak henüz doğrulamadan geçmiyor. Aşağıda düzeltin:
+            <span v-for="e in tabErrors" :key="e.path + e.code" class="block">{{ e.path.slice(tab.length + 1) || e.path }}: {{ e.message }}</span>
+          </p>
+          <div class="msg">
+            <div class="row spread"><span class="label sms-c">SMS</span><ChannelCounter :used="len(drafts[tab].sms, tab)" :limit="160" /></div>
+            <textarea v-model="drafts[tab].sms" class="field" rows="3" :readonly="!editable" />
+          </div>
+          <div class="msg">
+            <div class="row spread"><span class="label email-c">E-posta konusu</span><ChannelCounter :used="len(drafts[tab].email_subject, tab)" :limit="80" /></div>
+            <input v-model="drafts[tab].email_subject" class="field" :readonly="!editable" />
+          </div>
+          <div class="msg">
+            <span class="label email-c">E-posta gövdesi</span>
+            <textarea v-model="drafts[tab].email_body" class="field" rows="8" :readonly="!editable" />
+          </div>
+          <p class="small muted">Kişiselleştirmek için <code class="code">{{ PLACEHOLDER }}</code> kullanın. Sınırlar, bu dildeki alıcıların en uzun adına ({{ longest(tab) }} karakter) göre kontrol edilir.</p>
+        </template>
       </template>
       <p v-else-if="!generating && !streamText" class="muted">Henüz mesaj yok.</p>
     </section>
@@ -101,6 +121,9 @@
 
     <section v-if="queued" class="section notice">
       <strong>Kuyruğa alındı:</strong> {{ queued.sms.toLocaleString('tr-TR') }} SMS ve {{ queued.email.toLocaleString('tr-TR') }} e-posta.
+      <span v-if="queued.by_language && Object.keys(queued.by_language).length > 1">
+        ({{ Object.entries(queued.by_language).map(([l, n]) => `${LANG_NAMES[l] || l}: ${fmt(n)} kişi`).join(', ') }})
+      </span>
       <span v-if="queued.without_name.sms || queued.without_name.email">
         {{ queued.without_name.sms }} SMS ve {{ queued.without_name.email }} e-posta isimsiz gider (kayıtlı ad yok).
       </span>
@@ -125,13 +148,17 @@ import FailedRecipients from '../components/FailedRecipients.vue'
 
 const props = defineProps({ id: String })
 const PLACEHOLDER = '{{first_name}}'
+const LANG_NAMES = { tr: 'Türkçe', en: 'English' }
+const fmt = (n) => n.toLocaleString('tr-TR')
 
 const c = ref(null)
 const loadError = ref('')
 const brief = ref('')
 const busy = ref('')
 const audienceError = ref(null)
-const draft = ref(null)
+const drafts = ref({}) // draft per language: {tr: {sms, email_subject, email_body}, en: …}
+const tab = ref('')
+const selected = ref([]) // languages to revise
 const feedback = ref('')
 const generating = ref(false)
 const streamText = ref('')
@@ -150,24 +177,43 @@ const needsAck = computed(() => {
   const a = c.value?.audience
   return !!a && a.unsupported_criteria.length > 0 && !a.unsupported_acknowledged
 })
+// Languages the messages are written in: those with a reachable recipient.
+const langs = computed(() => c.value?.audience?.content_languages || [])
+const hasDrafts = computed(() => langs.value.some((l) => drafts.value[l]))
+const missing = computed(() => langs.value.filter((l) => !drafts.value[l]))
+const missingLabel = computed(() => missing.value.map((l) => LANG_NAMES[l] || l).join(' ve '))
+const revisable = computed(() => selected.value.filter((l) => drafts.value[l] && langs.value.includes(l)))
+const tabErrors = computed(() => fieldErrors.value.filter((e) => e.path === tab.value || e.path.startsWith(`${tab.value}.`)))
+
 const stale = computed(() => {
   const a = c.value?.audience
   return !!a && new Date(a.as_of).toDateString() !== new Date().toDateString()
 })
 
-// Length in characters, with the placeholder replaced by the longest name (as the backend checks).
-function len(text) {
-  const n = c.value?.audience?.reach.longest_first_name ?? 0
-  return [...(text || '').replaceAll('{{first_name}}', 'x'.repeat(n))].length
+// The longest first name among a language's recipients: what the backend measures with.
+function longest(lang) {
+  const r = c.value?.audience?.reach
+  return r?.languages?.[lang]?.longest_first_name ?? r?.longest_first_name ?? 0
 }
 
-const overLimit = computed(() => !!draft.value && (len(draft.value.sms) > 160 || len(draft.value.email_subject) > 80))
+// Length in characters, with the placeholder replaced by the longest name (as the backend checks).
+function len(text, lang) {
+  return [...(text || '').replaceAll('{{first_name}}', 'x'.repeat(longest(lang)))].length
+}
+
+const over = (l) => len(drafts.value[l].sms, l) > 160 || len(drafts.value[l].email_subject, l) > 80
+const empty = (l) => !drafts.value[l].sms.trim() || !drafts.value[l].email_subject.trim() || !drafts.value[l].email_body.trim()
+// A language whose tab gets a warning mark: no draft, a field over its limit or empty,
+// or validation errors.
+const problem = (l) => !drafts.value[l] || over(l) || empty(l) || fieldErrors.value.some((e) => e.path === l || e.path.startsWith(`${l}.`))
+
 const approveBlocker = computed(() => {
-  if (!draft.value) return 'Önce mesajları üretin.'
+  if (!hasDrafts.value) return 'Önce mesajları üretin.'
   if (needsAck.value) return 'Önce eksik kriterleri onaylayın.'
   if (stale.value) return 'Önce kitleyi yenileyin.'
-  if (overLimit.value) return 'Bir mesaj karakter sınırını aşıyor.'
-  if (!draft.value.sms.trim() || !draft.value.email_subject.trim() || !draft.value.email_body.trim()) return 'Tüm mesajları doldurun.'
+  if (missing.value.length) return `Önce ${missingLabel.value} mesajlarını yazın.`
+  if (langs.value.some(over)) return 'Bir mesaj karakter sınırını aşıyor.'
+  if (langs.value.some(empty)) return 'Tüm mesajları doldurun.'
   return ''
 })
 const canApprove = computed(() => !approveBlocker.value && !busy.value && !generating.value)
@@ -175,8 +221,14 @@ const canApprove = computed(() => !approveBlocker.value && !busy.value && !gener
 function apply(campaign) {
   c.value = campaign
   brief.value = campaign.brief
-  if (campaign.content && !generating.value) draft.value = { ...campaign.content }
-  fieldErrors.value = campaign.content_errors || []
+  if (!generating.value) {
+    drafts.value = Object.fromEntries(Object.entries(campaign.contents || {}).map(([l, d]) => [l, { ...d }]))
+    fieldErrors.value = campaign.content_errors || []
+  }
+  const ls = campaign.audience?.content_languages || []
+  if (!ls.includes(tab.value)) tab.value = ls[0] || ''
+  selected.value = selected.value.filter((l) => ls.includes(l))
+  if (!selected.value.length) selected.value = [...ls]
   loads.value++
   checkLogs()
 }
@@ -219,21 +271,32 @@ async function refresh() {
   try { apply(await run('refresh', () => api.refreshAudience(c.value.id))) } catch (e) { messageError.value = e.message }
 }
 
-async function generate() {
+// Merges what the stream wrote into the drafts: only its languages change, so edits in
+// the other tabs stay. errors replace those languages' errors.
+function merge(contents, errors = []) {
+  const written = Object.keys(contents || {})
+  for (const l of written) drafts.value[l] = { ...contents[l] }
+  const own = (e) => written.some((l) => e.path === l || e.path.startsWith(`${l}.`))
+  fieldErrors.value = [...fieldErrors.value.filter((e) => !own(e)), ...errors]
+  if (written.length && !written.includes(tab.value) && !drafts.value[tab.value]) tab.value = written[0]
+}
+
+// opts: {languages, feedback}; without languages, every language the audience needs.
+async function generate(opts = {}) {
   messageError.value = ''
   streamText.value = ''
   streamNote.value = 'Claude yazıyor…'
   generating.value = true
   abort = new AbortController()
   try {
-    await generateMessages(c.value.id, draft.value ? feedback.value.trim() : '', (e) => {
+    await generateMessages(c.value.id, opts, (e) => {
       if (e.type === 'delta') streamText.value += e.delta
       else if (e.type === 'retry') { streamText.value = ''; streamNote.value = 'İlk deneme doğrulamadan geçemedi; Claude yeniden deniyor…' }
-      else if (e.type === 'validated') { draft.value = { ...e.content }; fieldErrors.value = [] }
-      else if (e.type === 'invalid') { if (e.content) draft.value = { ...e.content }; fieldErrors.value = e.errors || [] }
+      else if (e.type === 'validated') merge(e.contents)
+      else if (e.type === 'invalid') merge(e.contents, e.errors || [])
       else if (e.type === 'error') messageError.value = e.message || 'Mesaj üretimi başarısız oldu.'
     }, abort.signal)
-    feedback.value = ''
+    if (opts.feedback) feedback.value = ''
   } catch (e) {
     if (e.name !== 'AbortError') messageError.value = e.message
   } finally {
@@ -244,10 +307,15 @@ async function generate() {
   }
 }
 
+function revise() {
+  return generate({ languages: revisable.value, feedback: feedback.value.trim() })
+}
+
 async function approve() {
   approveError.value = null
   try {
-    const res = await run('approve', () => api.approve(c.value.id, draft.value))
+    const contents = Object.fromEntries(langs.value.map((l) => [l, drafts.value[l]]))
+    const res = await run('approve', () => api.approve(c.value.id, contents))
     queued.value = res.queued
     apply(res.campaign)
   } catch (e) { approveError.value = { message: e.message, fields: e.fields || [] } }
@@ -265,6 +333,12 @@ async function approve() {
 .rules { margin: 0; padding-left: var(--space-6); }
 .msg { display: grid; gap: var(--space-2); }
 .feedback { width: 240px; padding: var(--space-2) var(--space-3); }
+.pick { border: 0; margin: 0; padding: 0; gap: var(--space-3); }
+.pick label { display: inline-flex; align-items: center; gap: var(--space-1); }
+.tabs { gap: 0; border-bottom: 1px solid var(--line); }
+.tab { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: var(--space-2) var(--space-4); font: 600 14px/22px var(--font-sans); color: var(--muted); cursor: pointer; }
+.tab.active { color: var(--brand); border-bottom-color: var(--brand); }
+.warn-mark { color: var(--warning); margin-left: var(--space-1); }
 .stream { margin: 0; white-space: pre-wrap; background: var(--surface-300); padding: var(--space-3); border-radius: var(--radius-md); }
 .block { display: block; }
 </style>

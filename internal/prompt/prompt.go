@@ -17,7 +17,7 @@ import (
 // Version is stored with every llm_calls row. Bump it whenever a system prompt, a user
 // template or a schema changes, so logged results can be tied to the prompt that
 // produced them.
-const Version = "2026-11-08.2"
+const Version = "2026-11-10.1"
 
 // briefBlock wraps the marketer's brief in tags the system prompt tells the model to
 // treat as data.

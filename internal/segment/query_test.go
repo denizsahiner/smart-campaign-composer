@@ -3,6 +3,7 @@ package segment
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -127,5 +128,22 @@ func TestEveryAllowedOpHasSQL(t *testing.T) {
 				t.Errorf("%s %s: %v", f, op, err)
 			}
 		}
+	}
+}
+
+func TestContentLanguages(t *testing.T) {
+	c := Counts{Languages: map[string]LanguageCounts{
+		"en": {Total: 3, SMS: 0, Email: 1},
+		"tr": {Total: 5, SMS: 2, Email: 0},
+	}}
+	if got := c.ContentLanguages(); !slices.Equal(got, []string{"tr", "en"}) {
+		t.Errorf("ContentLanguages = %v, want [tr en]", got)
+	}
+	c.Languages["en"] = LanguageCounts{Total: 3} // nobody reachable
+	if got := c.ContentLanguages(); !slices.Equal(got, []string{"tr"}) {
+		t.Errorf("ContentLanguages = %v, want [tr]", got)
+	}
+	if got := (Counts{}).ContentLanguages(); got != nil {
+		t.Errorf("empty = %v", got)
 	}
 }
