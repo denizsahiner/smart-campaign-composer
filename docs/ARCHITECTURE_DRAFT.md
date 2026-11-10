@@ -611,7 +611,7 @@ Plain JSON over `net/http`; no auth (single-marketer demo).
   backoff, rate limiter, LLM repair loop and give-up path (scripted `MockClient`), mock
   provider (dedup, `in_progress`, failures not cached, throttle windows, invalid
   recipients).
-- Integration tests: testcontainers-go starts a throwaway Postgres per test package. Covers
+- Integration tests: `make test` starts the compose Postgres and each test package creates a throwaway database in it. Covers
   claim with `SKIP LOCKED` and lease expiry, fenced result writes, idempotent approve under
   concurrent requests, consent filtering, and an end-to-end run against an in-process mock
   provider (fixed `PROVIDER_SEED`) with high error, timeout and throttle rates, asserting

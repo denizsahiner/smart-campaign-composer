@@ -1,7 +1,6 @@
 // Package dbtest gives integration tests a throwaway, migrated Postgres database.
-// Tests are skipped when TEST_DATABASE_URL is unset, so `make test` works without one.
-//
-// TODO: switch to testcontainers-go so integration tests need only Docker.
+// `make test` starts the compose Postgres and sets TEST_DATABASE_URL. When it is unset
+// (plain `go test`), tests that need a database are skipped.
 package dbtest
 
 import (

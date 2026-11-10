@@ -177,16 +177,12 @@ make test        # Go testleri + frontend testleri (Vitest)
 API anahtarı gerekmez, LLM mock'lanır. Go 1.26+ ve Node 18+ gerekir.
 
 Veritabanı entegrasyon testleri (onay, worker claim/lease, izin filtresi, mock sağlayıcıya
-karşı uçtan uca gönderim) bir Postgres ister. **`TEST_DATABASE_URL` yoksa bu testler
-atlanır.** Compose'daki veritabanına karşı çalıştırmak için:
-
-```sh
-docker compose up -d postgres
-TEST_DATABASE_URL="postgres://composer:composer@localhost:5433/composer?sslmode=disable" make test-go
-```
-
-Her test paketi kendi geçici veritabanını açar ve sonunda siler; sistemdeki veriye
-dokunulmaz.
+karşı uçtan uca gönderim) `make test` ile birlikte koşar: `make test-go`, compose'daki
+Postgres'i kendisi başlatır, testlerden sonra (kendisi başlattıysa) durdurur. Gereken tek
+şey Docker. Docker yoksa test sessizce atlanmaz, net bir hata verir. Kendi Postgres'inizi
+kullanmak için `TEST_DATABASE_URL` verin; o zaman container başlatılmaz. Her test paketi
+kendi geçici veritabanını açar ve sonunda siler; sistemdeki veriye dokunulmaz.
+Veritabanı olmadan, entegrasyon testleri atlanarak koşmak için: `make test-db-less`.
 
 Tek bir istek için iki LLM adımını gerçek API'ye karşı denemek için (Go container'ında
 çalışır):
@@ -229,8 +225,6 @@ ai-sessions/        Claude Code oturum kayıtları
   giren ya da izni değişen kişiler hesaba katılmaz (en fazla 14 gün).
 - **İki dil.** Mesajlar Türkçe ve İngilizce yazılır (`users.language` yalnızca bu iki
   değeri alabiliyor). Arayüz metinleri Türkçe.
-- **Entegrasyon testleri bir Postgres adresi istiyor** (bkz. Testler). Plan, yalnızca
-  Docker'ın yeterli olması için testcontainers-go kullanmaktı; bu henüz yapılmadı.
 - **SMS uzunluğu** case'teki 160 karakter kuralına göre kontrol ediliyor. GSM-7 / UCS-2
   kodlaması (Türkçe karakterlerin gerçek limiti 70'e düşürmesi) kapsam dışı.
 - **Kitle kuralları** yalnızca AND ile birleşir (OR / NOT yok) ve arayüzde kitle
