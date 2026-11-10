@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
@@ -155,28 +156,61 @@ func writeBusy(w http.ResponseWriter) {
 	writeError(w, http.StatusConflict, "busy", "Claude is already working on this campaign.")
 }
 
-// statusRecorder captures the status code for logging. Unwrap lets
+// statusRecorder captures the status code for logging, and whether the response has
+// started (after that a panic can no longer turn it into a 500). Unwrap lets
 // http.ResponseController reach the underlying writer's Flush for SSE.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status  int
+	started bool
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
+	r.started = true
 	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	r.started = true
+	return r.ResponseWriter.Write(b)
 }
 
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
+// logRequests logs every request (except health checks) and recovers handler panics.
+// The recovery runs first, so a recovered panic is logged as a 500.
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
+		defer func() {
+			if r.URL.Path != "/healthz" {
+				slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", rec.status,
+					"duration", time.Since(start).Round(time.Millisecond))
+			}
+		}()
+		defer recoverPanic(rec, r)
 		next.ServeHTTP(rec, r)
-		if r.URL.Path != "/healthz" {
-			slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", rec.status,
-				"duration", time.Since(start).Round(time.Millisecond))
-		}
 	})
+}
+
+// recoverPanic turns a handler panic into a logged 500 with the stack trace, instead of
+// net/http's plain-text log line and a dropped connection. If the response has already
+// started (an SSE stream, say) the status can't change, so the connection is aborted
+// rather than ended as if the response were complete. http.ErrAbortHandler is that
+// deliberate abort and is passed through untouched.
+func recoverPanic(w *statusRecorder, r *http.Request) {
+	v := recover()
+	if v == nil {
+		return
+	}
+	if v == http.ErrAbortHandler {
+		panic(v)
+	}
+	slog.Error("panic", "method", r.Method, "path", r.URL.Path, "panic", v, "stack", string(debug.Stack()))
+	if w.started {
+		panic(http.ErrAbortHandler)
+	}
+	writeError(w, http.StatusInternalServerError, "internal", "Something went wrong on our side.")
 }
