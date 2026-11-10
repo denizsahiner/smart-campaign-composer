@@ -261,9 +261,9 @@ func (w *Worker) write(ctx context.Context, m Message, what string, fn func(cont
 	switch {
 	case err != nil:
 		// The row stays 'sending' and comes back when its lease expires.
-		slog.Error("result write failed", "message", m.ID, "outcome", what, "err", err)
+		slog.Error("result write failed", "message_id", m.ID, "outcome", what, "err", err)
 	case !ok:
-		slog.Warn("stale result dropped", "message", m.ID, "attempt", m.Attempts, "outcome", what)
+		slog.Warn("stale result dropped", "message_id", m.ID, "attempt", m.Attempts, "outcome", what)
 	}
 	return ok && err == nil
 }
@@ -284,7 +284,7 @@ func (w *Worker) flushCompleted(ctx context.Context) {
 	c, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
 	defer cancel()
 	if err := w.queue.CompleteCampaigns(c, ids); err != nil {
-		slog.Error("completion check failed", "campaigns", ids, "err", err)
+		slog.Error("completion check failed", "campaign_ids", ids, "err", err)
 		w.mu.Lock()
 		for _, id := range ids {
 			w.touched[id] = true

@@ -273,7 +273,7 @@ func (s *Server) campaignEvents(w http.ResponseWriter, r *http.Request) {
 		p, err := s.readProgress(ctx, c.ID)
 		if err != nil {
 			if ctx.Err() == nil {
-				slog.Error("progress read failed", "campaign", c.ID, "err", err)
+				slog.Error("progress read failed", "campaign_id", c.ID, "err", err)
 				sse.event("error", map[string]string{"message": "Could not read delivery status; reconnect to retry."})
 			}
 			return
