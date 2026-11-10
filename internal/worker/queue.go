@@ -82,11 +82,18 @@ func (q *Queue) MarkSent(ctx context.Context, m Message, providerID string) (boo
 	return tag.RowsAffected() == 1, err
 }
 
-// MarkFailed ends the message without another attempt.
-func (q *Queue) MarkFailed(ctx context.Context, m Message, lastErr string) (bool, error) {
+// Why a message failed (messages.failure).
+const (
+	FailurePermanent        = "permanent"         // the provider rejected it
+	FailureRetriesExhausted = "retries_exhausted" // temporary errors used up its attempts
+)
+
+// MarkFailed ends the message without another attempt; failure is one of the Failure
+// constants.
+func (q *Queue) MarkFailed(ctx context.Context, m Message, lastErr, failure string) (bool, error) {
 	tag, err := q.pool.Exec(ctx, `
-		UPDATE messages SET status = 'failed', locked_until = NULL, last_error = $3, updated_at = now()
-		WHERE id = $1 AND status = 'sending' AND attempts = $2`, m.ID, m.Attempts, lastErr)
+		UPDATE messages SET status = 'failed', failure = $4, locked_until = NULL, last_error = $3, updated_at = now()
+		WHERE id = $1 AND status = 'sending' AND attempts = $2`, m.ID, m.Attempts, lastErr, failure)
 	return tag.RowsAffected() == 1, err
 }
 

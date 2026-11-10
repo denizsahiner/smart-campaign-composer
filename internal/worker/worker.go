@@ -230,14 +230,14 @@ func (w *Worker) apply(ctx context.Context, ch *channel, m Message, out Outcome)
 		}
 	case Permanent:
 		if w.final(ctx, m, out, func(c context.Context) (bool, error) {
-			return w.queue.MarkFailed(c, m, out.Err)
+			return w.queue.MarkFailed(c, m, out.Err, FailurePermanent)
 		}) {
 			log.Error("message failed", "reason", "rejected by provider", "err", out.Err)
 		}
 	case Retry:
 		if m.Attempts >= w.cfg.MaxAttempts {
 			if w.final(ctx, m, out, func(c context.Context) (bool, error) {
-				return w.queue.MarkFailed(c, m, out.Err)
+				return w.queue.MarkFailed(c, m, out.Err, FailureRetriesExhausted)
 			}) {
 				log.Error("message failed", "reason", "retries exhausted", "err", out.Err)
 			}

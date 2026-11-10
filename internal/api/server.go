@@ -57,6 +57,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/campaigns/{id}/audience/refresh", s.refreshAudience)
 	mux.HandleFunc("POST /api/campaigns/{id}/approve", s.approve)
 	mux.HandleFunc("GET /api/campaigns/{id}/events", s.campaignEvents)
+	mux.HandleFunc("GET /api/campaigns/{id}/failures", s.listFailures)
+	mux.HandleFunc("GET /api/campaigns/{id}/failures.csv", s.failuresCSV)
 	mux.HandleFunc("GET /api/metrics", s.metrics)
 	mux.HandleFunc("GET /api/logs", s.listLogs)
 	mux.HandleFunc("GET /api/logs/summary", s.logSummary)

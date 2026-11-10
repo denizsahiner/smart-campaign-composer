@@ -110,6 +110,7 @@
     </p>
 
     <DeliveryProgress v-if="sending" :key="c.id" :campaign-id="c.id" @done="reload" />
+    <FailedRecipients v-if="sending" :campaign-id="c.id" :version="loads" />
   </div>
 </template>
 
@@ -120,6 +121,7 @@ import BaseButton from '../components/BaseButton.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import ChannelCounter from '../components/ChannelCounter.vue'
 import DeliveryProgress from '../components/DeliveryProgress.vue'
+import FailedRecipients from '../components/FailedRecipients.vue'
 
 const props = defineProps({ id: String })
 const PLACEHOLDER = '{{first_name}}'
@@ -139,6 +141,7 @@ const fieldErrors = ref([])
 const approveError = ref(null)
 const queued = ref(null)
 const logErrors = ref(0)
+const loads = ref(0) // bumped on every (re)load, so the failed recipients list follows
 let abort = null
 
 const editable = computed(() => c.value && (c.value.status === 'draft' || c.value.status === 'ready'))
@@ -174,6 +177,7 @@ function apply(campaign) {
   brief.value = campaign.brief
   if (campaign.content && !generating.value) draft.value = { ...campaign.content }
   fieldErrors.value = campaign.content_errors || []
+  loads.value++
   checkLogs()
 }
 

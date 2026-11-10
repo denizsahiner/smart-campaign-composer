@@ -6,6 +6,7 @@ import { campaign, jsonResponse, sseResponse, sse, mockFetch, FakeEventSource } 
 const GOOD = { sms: 'Merhaba {{first_name}}, sepetin seni bekliyor!', email_subject: '%30 indirim', email_body: 'Sepetindekiler hâlâ orada.' }
 
 const SUMMARY = 'GET /api/logs/summary?campaign_id=7&level=error'
+const FAILURES = 'GET /api/campaigns/7/failures'
 const mountDetail = () => mount(CampaignDetail, { props: { id: '7' }, global: { stubs: { RouterLink: RouterLinkStub } } })
 
 // errors: what the log summary reports for the campaign.
@@ -13,6 +14,7 @@ async function open(c, routes = {}, { errors = 0 } = {}) {
   const calls = mockFetch({
     'GET /api/campaigns/7': () => jsonResponse(200, c),
     [SUMMARY]: () => jsonResponse(200, { errors, warnings: 3 }),
+    [FAILURES]: () => jsonResponse(200, { failures: [], total: 0, next_before: null }),
     ...routes,
   })
   const w = mountDetail()
@@ -21,7 +23,7 @@ async function open(c, routes = {}, { errors = 0 } = {}) {
 }
 
 // The last call other than the log summary checks that follow every action.
-const lastAction = (calls) => calls.filter((x) => x.key !== SUMMARY).at(-1)
+const lastAction = (calls) => calls.filter((x) => x.key !== SUMMARY && x.key !== FAILURES).at(-1)
 
 const button = (w, text) => w.findAll('button').find((b) => b.text().replace('…', '') === text)
 const approveButton = (w) => button(w, 'Onayla ve gönder')
@@ -271,6 +273,33 @@ describe('approval', () => {
     expect(w.text()).toContain("The messages don't pass validation.")
     expect(w.text()).toContain('email_body: Unknown placeholder {{city}}.')
     expect(approveButton(w)).toBeDefined()
+  })
+
+  it('lists the rejected recipients of an approved campaign, and reloads them when delivery is done', async () => {
+    let total = 1
+    const failure = (id) => ({ message_id: id, user_id: 3, first_name: 'Ayşe', last_name: 'Yılmaz', channel: 'sms', address: '+902125550123', reason: 'Geçersiz telefon numarası', error: '400 invalid_recipient: not a Turkish mobile number', failed_at: new Date().toISOString() })
+    const { w, calls } = await open(approved(), {
+      [FAILURES]: () => jsonResponse(200, { failures: Array.from({ length: total }, (_, i) => failure(i + 1)), total, next_before: null }),
+    })
+    expect(w.text()).toContain('Gönderilemeyen alıcılar')
+    expect(w.text()).toContain('1 alıcıya gönderilemedi')
+    expect(calls.filter((x) => x.key === FAILURES)).toHaveLength(1)
+
+    total = 2
+    mockFetch({
+      'GET /api/campaigns/7': () => jsonResponse(200, campaign({ content: GOOD, status: 'completed' })),
+      [SUMMARY]: () => jsonResponse(200, { errors: 2, warnings: 0 }),
+      [FAILURES]: () => jsonResponse(200, { failures: [failure(1), failure(2)], total, next_before: null }),
+    })
+    FakeEventSource.last().emit('done', { campaign_id: 7, status: 'completed', channels: { sms: {}, email: {} }, total: { sms: 0, email: 0 }, rate_per_second: {} })
+    await flushPromises()
+    expect(w.text()).toContain('2 alıcıya gönderilemedi')
+  })
+
+  it('shows no failed recipients section before approval', async () => {
+    const { w, calls } = await open(campaign({ content: GOOD }))
+    expect(w.text()).not.toContain('Gönderilemeyen alıcılar')
+    expect(calls.map((x) => x.key)).not.toContain(FAILURES)
   })
 
   it('reloads the campaign when delivery is done', async () => {

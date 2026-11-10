@@ -157,6 +157,9 @@ func TestEndToEndUnreliableProvider(t *testing.T) {
 	if len(failed) != 2 || failed[0].attempts != 1 || failed[1].attempts != 1 {
 		t.Errorf("failed rows %+v, want the two invalid recipients after one attempt", failed)
 	}
+	if n := countWhere(t, pool, `failure = 'permanent' AND to_address IN ('+902125550123', 'x@bounce.invalid')`); n != 2 {
+		t.Errorf("%d invalid recipients marked permanent, want 2", n)
+	}
 
 	sms := snap.Totals["sms"]
 	if sms.Rejected["server_error"] == 0 || sms.Rejected["throttled"] == 0 || sms.HungAfterDelivery+snap.Totals["email"].HungAfterDelivery == 0 {
@@ -220,7 +223,7 @@ func TestLeaseExpiryAndFencedWrite(t *testing.T) {
 	if ok, err := q.MarkSent(ctx, second[0], "sms_x"); !ok || err != nil {
 		t.Fatalf("current write rejected: %v %v", ok, err)
 	}
-	if ok, _ := q.MarkFailed(ctx, first[0], "late"); ok {
+	if ok, _ := q.MarkFailed(ctx, first[0], "late", FailurePermanent); ok {
 		t.Fatal("stale write overwrote a sent row")
 	}
 }
@@ -287,11 +290,22 @@ func TestRetriesExhaustToFailed(t *testing.T) {
 			t.Errorf("message %s: %q, want failed", id, r.status)
 		}
 	}
-	var n int
-	pool.QueryRow(context.Background(), `SELECT count(*) FROM messages WHERE attempts = 3 AND last_error LIKE '5%'`).Scan(&n)
-	if n != 6 {
+	// The invalid recipients are rejected before the dice, so they are permanent.
+	if n := countWhere(t, pool, `attempts = 3 AND last_error LIKE '5%' AND failure = 'retries_exhausted'`); n != 6 {
 		t.Errorf("%d messages failed after 3 attempts with a 5xx, want 6", n)
 	}
+	if n := countWhere(t, pool, `failure = 'permanent'`); n != 2 {
+		t.Errorf("%d permanent failures, want the 2 invalid recipients", n)
+	}
+}
+
+func countWhere(t *testing.T, pool *pgxpool.Pool, cond string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM messages WHERE `+cond).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 // Each retry is a warning and each message given up on an error, both with the campaign

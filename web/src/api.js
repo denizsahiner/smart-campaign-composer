@@ -41,6 +41,9 @@ export const api = {
   refreshAudience: (id) => call('POST', `/api/campaigns/${id}/audience/refresh`),
   approve: (id, content) => call('POST', `/api/campaigns/${id}/approve`, { content }),
   metrics: () => call('GET', '/api/metrics'),
+  // Recipients the provider rejected for good, newest first: {failures, total, next_before}.
+  failures: (id, params) => call('GET', `/api/campaigns/${id}/failures${query(params)}`),
+  failuresCSV: (id) => `/api/campaigns/${id}/failures.csv`,
   // Stored warnings and errors, newest first. Filters: level (warn | error), service,
   // campaign_id, request_id, q; paging: before (the previous page's next_before), limit.
   logs: (params) => call('GET', `/api/logs${query(params)}`),
