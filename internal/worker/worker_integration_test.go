@@ -228,6 +228,35 @@ func TestLeaseExpiryAndFencedWrite(t *testing.T) {
 	}
 }
 
+// A scheduled campaign's messages aren't claimed before their time; the claim that takes
+// the first one moves the campaign to approved.
+func TestClaimStartsAScheduledCampaign(t *testing.T) {
+	ctx := context.Background()
+	pool := dbtest.New(t)
+	cid := queueCampaign(t, pool, 1)
+	pool.Exec(ctx, `UPDATE campaigns SET status = 'scheduled', scheduled_at = now() + interval '1 hour' WHERE id = $1`, cid)
+	pool.Exec(ctx, `UPDATE messages SET next_attempt_at = now() + interval '1 hour' WHERE campaign_id = $1`, cid)
+	q := NewQueue(pool)
+	status := func() (s string) {
+		pool.QueryRow(ctx, `SELECT status FROM campaigns WHERE id = $1`, cid).Scan(&s)
+		return s
+	}
+
+	if got, err := q.Claim(ctx, "sms", 4, time.Minute); err != nil || len(got) != 0 {
+		t.Fatalf("claimed before the scheduled time: %+v %v", got, err)
+	}
+	if s := status(); s != "scheduled" {
+		t.Fatalf("status = %s before the time", s)
+	}
+	pool.Exec(ctx, `UPDATE messages SET next_attempt_at = now() - interval '1 second' WHERE campaign_id = $1`, cid)
+	if got, err := q.Claim(ctx, "sms", 1, time.Minute); err != nil || len(got) != 1 {
+		t.Fatalf("claim at the time: %+v %v", got, err)
+	}
+	if s := status(); s != "approved" {
+		t.Errorf("status = %s after the first claim, want approved", s)
+	}
+}
+
 // An unreachable provider refunds the attempt and pauses the channel; the rows the paused
 // channel had claimed are handed back instead of waiting out the pause.
 func TestUnreachableProviderRefundsAndPauses(t *testing.T) {

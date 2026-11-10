@@ -61,14 +61,14 @@ func TestApproveTwiceAtStoreLevel(t *testing.T) {
 	ctx := context.Background()
 	st, _, count, id, seg, asOf := setup(t)
 
-	q, err := st.Approve(ctx, id, first, seg, asOf)
+	q, err := st.Approve(ctx, id, first, seg, asOf, nil)
 	if err != nil || q.SMS == 0 || q.Email == 0 {
 		t.Fatalf("first approve: %+v, %v", q, err)
 	}
 	queued := count(`SELECT count(*) FROM messages WHERE campaign_id = $1`)
 
 	other := content.Content{SMS: "Başka", EmailSubject: "Başka", EmailBody: "Başka"}
-	if _, err := st.Approve(ctx, id, content.Set{"tr": other, "en": other}, seg, asOf); !errors.Is(err, store.ErrNotEditable) {
+	if _, err := st.Approve(ctx, id, content.Set{"tr": other, "en": other}, seg, asOf, nil); !errors.Is(err, store.ErrNotEditable) {
 		t.Fatalf("second approve: err = %v, want ErrNotEditable", err)
 	}
 	c, _ := st.Get(ctx, id)
@@ -91,7 +91,7 @@ func TestApproveNoRecipientsRollsBack(t *testing.T) {
 	if err != nil || tag.RowsAffected() == 0 {
 		t.Fatalf("no Ankara users to update: %v", err)
 	}
-	if _, err := st.Approve(ctx, id, first, seg, asOf); !errors.Is(err, store.ErrNoRecipients) {
+	if _, err := st.Approve(ctx, id, first, seg, asOf, nil); !errors.Is(err, store.ErrNoRecipients) {
 		t.Fatalf("err = %v, want ErrNoRecipients", err)
 	}
 	c, _ := st.Get(ctx, id)
@@ -109,7 +109,7 @@ func TestApproveRendersEachRecipientsLanguage(t *testing.T) {
 	if got := c.ContentLanguages(); len(got) != 2 {
 		t.Fatalf("Ankara audience languages = %v, want tr and en (the seed has both)", got)
 	}
-	q, err := st.Approve(ctx, id, first, seg, asOf)
+	q, err := st.Approve(ctx, id, first, seg, asOf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestApproveRendersEachRecipientsLanguage(t *testing.T) {
 func TestApproveWithoutARecipientsLanguageFails(t *testing.T) {
 	ctx := context.Background()
 	st, _, count, id, seg, asOf := setup(t)
-	if _, err := st.Approve(ctx, id, content.Set{"tr": first["tr"]}, seg, asOf); !errors.Is(err, store.ErrMissingLanguage) {
+	if _, err := st.Approve(ctx, id, content.Set{"tr": first["tr"]}, seg, asOf, nil); !errors.Is(err, store.ErrMissingLanguage) {
 		t.Fatal("approved with English recipients and no English content")
 	}
 	if n := count(`SELECT count(*) FROM messages WHERE campaign_id = $1`); n != 0 {
@@ -169,5 +169,66 @@ func TestSetContentsReadiness(t *testing.T) {
 	}
 	if c, _ := st.Get(ctx, id); c.Status != store.StatusReady || c.ContentErrors != nil || c.Contents["tr"] != first["tr"] {
 		t.Errorf("both valid: %+v", c)
+	}
+}
+
+// A scheduled approve queues everything now, each message due at the scheduled time;
+// cancelling deletes them and gives back a ready campaign that can be approved again.
+func TestScheduleAndCancel(t *testing.T) {
+	ctx := context.Background()
+	st, pool, count, id, seg, asOf := setup(t)
+	sendAt := time.Now().Add(2 * time.Hour).Truncate(time.Microsecond)
+
+	q, err := st.Approve(ctx, id, first, seg, asOf, &sendAt)
+	if err != nil || q.SMS == 0 {
+		t.Fatalf("approve: %+v, %v", q, err)
+	}
+	c, _ := st.Get(ctx, id)
+	if c.Status != store.StatusScheduled || c.ScheduledAt == nil || !c.ScheduledAt.Equal(sendAt) {
+		t.Fatalf("campaign = %s at %v, want scheduled at %v", c.Status, c.ScheduledAt, sendAt)
+	}
+	if n := count(`SELECT count(*) FROM messages WHERE campaign_id = $1 AND next_attempt_at <> (SELECT scheduled_at FROM campaigns WHERE id = $1)`); n != 0 {
+		t.Errorf("%d messages not due at the scheduled time", n)
+	}
+
+	if err := st.CancelSchedule(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = st.Get(ctx, id)
+	if c.Status != store.StatusReady || c.ScheduledAt != nil || c.ApprovedAt != nil || c.Contents["en"] != first["en"] {
+		t.Errorf("after cancel: %+v", c)
+	}
+	if n := count(`SELECT count(*) FROM messages WHERE campaign_id = $1`); n != 0 {
+		t.Errorf("%d messages left after cancel", n)
+	}
+	if err := st.CancelSchedule(ctx, id); !errors.Is(err, store.ErrNotScheduled) {
+		t.Errorf("second cancel: err = %v, want ErrNotScheduled", err)
+	}
+
+	// Approved again, then the send starts (a message is taken, as the worker's claim
+	// does it): too late to cancel, and nothing is deleted.
+	if _, err := st.Approve(ctx, id, first, seg, asOf, &sendAt); err != nil {
+		t.Fatal(err)
+	}
+	queued := count(`SELECT count(*) FROM messages WHERE campaign_id = $1`)
+	pool.Exec(ctx, `UPDATE messages SET status = 'sending', locked_until = now() + interval '1 minute'
+		WHERE id = (SELECT min(id) FROM messages WHERE campaign_id = $1)`, id)
+	pool.Exec(ctx, `UPDATE campaigns SET status = 'approved' WHERE id = $1`, id)
+	if err := st.CancelSchedule(ctx, id); !errors.Is(err, store.ErrSendStarted) {
+		t.Errorf("cancel after start: err = %v, want ErrSendStarted", err)
+	}
+	if n := count(`SELECT count(*) FROM messages WHERE campaign_id = $1`); n != queued {
+		t.Errorf("messages %d → %d after a refused cancel", queued, n)
+	}
+}
+
+func TestCancelAnImmediateSendIsRefused(t *testing.T) {
+	ctx := context.Background()
+	st, _, _, id, seg, asOf := setup(t)
+	if _, err := st.Approve(ctx, id, first, seg, asOf, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CancelSchedule(ctx, id); !errors.Is(err, store.ErrNotScheduled) {
+		t.Errorf("err = %v, want ErrNotScheduled", err)
 	}
 }

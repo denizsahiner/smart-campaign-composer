@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises, RouterLinkStub } from '@vue/test-utils'
 import CampaignDetail from '../src/views/CampaignDetail.vue'
 import { campaign, jsonResponse, sseResponse, sse, mockFetch, FakeEventSource } from './helpers'
@@ -419,5 +419,108 @@ describe('languages', () => {
     const { w } = await open(campaign({ contents: { tr: GOOD } }))
     expect(w.find('.pick').exists()).toBe(false)
     expect(tabs(w).map((t) => t.text())).toEqual(['Türkçe · 1.200 kişi'])
+  })
+})
+
+describe('scheduling', () => {
+  // Tomorrow's date in Istanbul (UTC+3 all year), as a datetime-local value at hh:mm.
+  const tomorrowAt = (hhmm) => new Date(Date.now() + 3 * 3600e3 + 24 * 3600e3).toISOString().slice(0, 10) + 'T' + hhmm
+  const scheduleButton = (w) => button(w, 'Zamanla')
+  const scheduledAt = () => new Date(`${tomorrowAt('12:00')}:00+03:00`).toISOString()
+  const scheduledCampaign = () => campaign({ contents: { tr: GOOD }, status: 'scheduled', approved_at: new Date().toISOString(), scheduled_at: scheduledAt() })
+
+  async function pickLater(w, value) {
+    await w.find('input[type="radio"][value="later"]').setValue()
+    if (value) await w.find('input[type="datetime-local"]').setValue(value)
+  }
+
+  it('schedules for the chosen Istanbul time', async () => {
+    const { w, calls } = await open(campaign({ contents: { tr: GOOD } }), {
+      'POST /api/campaigns/7/approve': () => jsonResponse(200, {
+        campaign: scheduledCampaign(), queued: { sms: 900, email: 1000, without_name: { sms: 0, email: 0 } },
+      }),
+    })
+    await pickLater(w)
+    expect(approveButton(w)).toBeUndefined()
+    expect(scheduleButton(w).attributes('disabled')).toBeDefined()
+    expect(w.text()).toContain('Gönderim zamanını seçin.')
+    expect(w.text()).toContain('09:00–21:00 arası')
+
+    await w.find('input[type="datetime-local"]').setValue(tomorrowAt('12:00'))
+    await scheduleButton(w).trigger('click')
+    await flushPromises()
+
+    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/approve', body: { contents: { tr: GOOD }, send_at: scheduledAt() } })
+    expect(scheduledAt()).toMatch(/T09:00:00\.000Z$/) // 12:00 in Istanbul
+    expect(w.find('.badge').text()).toBe('Zamanlandı')
+    expect(w.find('.scheduled').text()).toContain('12:00 tarihinde gönderilecek')
+    expect(w.text()).not.toContain('Gönderim durumu') // no progress before the time
+  })
+
+  it.each([
+    ['22:00', '21:00–09:00 arasına zamanlanamaz.'],
+    ['08:59', '21:00–09:00 arasına zamanlanamaz.'],
+  ])('blocks a send at %s (quiet hours)', async (hhmm, msg) => {
+    const { w } = await open(campaign({ contents: { tr: GOOD } }))
+    await pickLater(w, tomorrowAt(hhmm))
+    expect(scheduleButton(w).attributes('disabled')).toBeDefined()
+    expect(w.text()).toContain(msg)
+  })
+
+  it('blocks a time more than 14 days ahead', async () => {
+    const { w } = await open(campaign({ contents: { tr: GOOD } }))
+    const far = new Date(Date.now() + 3 * 3600e3 + 15 * 24 * 3600e3).toISOString().slice(0, 10) + 'T12:00'
+    await pickLater(w, far)
+    expect(w.text()).toContain('En fazla 14 gün sonrasına zamanlanabilir.')
+  })
+
+  it('cancels a scheduled send and makes the campaign editable again', async () => {
+    const { w, calls } = await open(scheduledCampaign(), {
+      'POST /api/campaigns/7/schedule/cancel': () => jsonResponse(200, campaign({ contents: { tr: GOOD } })),
+    })
+    expect(approveButton(w)).toBeUndefined()
+    await button(w, 'Zamanlamayı iptal et').trigger('click')
+    await flushPromises()
+    expect(lastAction(calls).key).toBe('POST /api/campaigns/7/schedule/cancel')
+    expect(w.find('.scheduled').exists()).toBe(false)
+    expect(w.find('.badge').text()).toBe('Hazır')
+    expect(approveButton(w)).toBeDefined()
+  })
+
+  it('says why a cancel was refused and shows the send that started', async () => {
+    const { w } = await open(scheduledCampaign(), {
+      'POST /api/campaigns/7/schedule/cancel': () => jsonResponse(409, { error: { code: 'send_started', message: 'The scheduled send has already started.' } }),
+    })
+    mockFetch({
+      'GET /api/campaigns/7': () => jsonResponse(200, { ...scheduledCampaign(), status: 'approved' }),
+      'POST /api/campaigns/7/schedule/cancel': () => jsonResponse(409, { error: { code: 'send_started', message: 'The scheduled send has already started.' } }),
+      [SUMMARY]: () => jsonResponse(200, { errors: 0, warnings: 0 }),
+      [FAILURES]: () => jsonResponse(200, { failures: [], total: 0, next_before: null }),
+    })
+    await button(w, 'Zamanlamayı iptal et').trigger('click')
+    await flushPromises()
+    expect(w.find('.badge').text()).toBe('Onaylandı')
+    expect(w.text()).toContain('için zamanlanmıştı')
+    expect(FakeEventSource.last().url).toBe('/api/campaigns/7/events')
+  })
+
+  it('reloads when the scheduled time has come, so progress appears by itself', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const due = { ...scheduledCampaign(), scheduled_at: new Date(Date.now() - 1000).toISOString() }
+      const { w } = await open(due)
+      expect(w.find('.badge').text()).toBe('Zamanlandı')
+      mockFetch({
+        'GET /api/campaigns/7': () => jsonResponse(200, { ...due, status: 'approved' }),
+        [SUMMARY]: () => jsonResponse(200, { errors: 0, warnings: 0 }),
+        [FAILURES]: () => jsonResponse(200, { failures: [], total: 0, next_before: null }),
+      })
+      vi.advanceTimersByTime(3000)
+      await flushPromises()
+      expect(w.find('.badge').text()).toBe('Onaylandı')
+      expect(FakeEventSource.last().url).toBe('/api/campaigns/7/events')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

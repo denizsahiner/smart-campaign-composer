@@ -34,8 +34,10 @@ type Queued struct {
 // Approve freezes the campaign with its final content and queues one message per
 // (recipient, channel) in the recipient's language, all in one transaction. set has a
 // validated draft for every language the audience needs; it replaces the stored drafts.
+// sendAt nil sends at once; otherwise the campaign becomes scheduled and every message
+// waits for sendAt (next_attempt_at), the recipients and texts still fixed now.
 //
-//   - The status change is conditional (draft or ready → approved). Its row lock makes a
+//   - The status change is conditional (draft or ready → approved or scheduled). Its row lock makes a
 //     concurrent approve wait, then find the campaign approved and get ErrNotEditable:
 //     the content can't be overwritten with something other than what was queued.
 //   - Recipients are the segment at the stored reference time, with the per-channel
@@ -49,7 +51,7 @@ type Queued struct {
 //
 // With no reachable recipient nothing is written and ErrNoRecipients is returned.
 func (s *Store) Approve(ctx context.Context, id int64, set content.Set,
-	seg segment.Segment, asOf time.Time) (Queued, error) {
+	seg segment.Segment, asOf time.Time, sendAt *time.Time) (Queued, error) {
 
 	q := Queued{ByLanguage: map[string]int{}}
 	tx, err := s.pool.Begin(ctx)
@@ -59,8 +61,9 @@ func (s *Store) Approve(ctx context.Context, id int64, set content.Set,
 	defer tx.Rollback(ctx)
 
 	tag, err := tx.Exec(ctx, `
-		UPDATE campaigns SET status = 'approved', approved_at = now(), updated_at = now()
-		WHERE id = $1 AND status IN ('draft', 'ready')`, id)
+		UPDATE campaigns SET status = CASE WHEN $2::timestamptz IS NULL THEN 'approved' ELSE 'scheduled' END,
+		       scheduled_at = $2, approved_at = now(), updated_at = now()
+		WHERE id = $1 AND status IN ('draft', 'ready')`, id, sendAt)
 	if err != nil {
 		return q, err
 	}
@@ -147,13 +150,62 @@ func (s *Store) Approve(ctx context.Context, id int64, set content.Set,
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO messages (campaign_id, user_id, channel, to_address, subject, body)
-		SELECT $1, m.user_id, m.channel, m.to_address, m.subject, m.body
+		INSERT INTO messages (campaign_id, user_id, channel, to_address, subject, body, next_attempt_at)
+		SELECT $1, m.user_id, m.channel, m.to_address, m.subject, m.body, COALESCE($7::timestamptz, now())
 		FROM unnest($2::bigint[], $3::text[], $4::text[], $5::text[], $6::text[])
 		     AS m(user_id, channel, to_address, subject, body)
 		ON CONFLICT (campaign_id, user_id, channel) DO NOTHING`,
-		id, userIDs, channels, addrs, subjects, bodies); err != nil {
+		id, userIDs, channels, addrs, subjects, bodies, sendAt); err != nil {
 		return q, fmt.Errorf("queue messages: %w", err)
 	}
 	return q, tx.Commit(ctx)
+}
+
+// ErrNotScheduled means the campaign isn't waiting for a scheduled send (any more).
+var ErrNotScheduled = errors.New("store: campaign is not scheduled")
+
+// ErrSendStarted means the scheduled time came and the worker has taken a message: the
+// send can't be called off any more.
+var ErrSendStarted = errors.New("store: the scheduled send has started")
+
+// CancelSchedule calls off a scheduled send: its queued messages are deleted and the
+// campaign goes back to ready, drafts and audience kept, to be edited and approved again.
+//
+// The messages are deleted first, then the campaign row is updated, the same order the
+// worker's claim locks them in (messages, then the campaign it moves to approved), so the
+// two can't deadlock. A message the claim got to first is 'sending', isn't deleted, and
+// the claim has moved the campaign to approved: the update finds no scheduled campaign and
+// everything is rolled back with ErrSendStarted.
+func (s *Store) CancelSchedule(ctx context.Context, id int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM messages m USING campaigns c
+		WHERE m.campaign_id = $1 AND c.id = $1 AND c.status = 'scheduled' AND m.status = 'pending'`, id); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE campaigns SET status = 'ready', scheduled_at = NULL, approved_at = NULL, updated_at = now()
+		WHERE id = $1 AND status = 'scheduled'
+		  AND NOT EXISTS (SELECT 1 FROM messages WHERE campaign_id = $1)`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 {
+		return tx.Commit(ctx)
+	}
+	// Why not: a campaign that was scheduled keeps scheduled_at once sending starts.
+	c, err := s.Get(ctx, id)
+	switch {
+	case err != nil:
+		return err
+	case c.ScheduledAt != nil:
+		return ErrSendStarted
+	default:
+		return ErrNotScheduled
+	}
 }

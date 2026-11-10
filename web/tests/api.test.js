@@ -57,6 +57,13 @@ describe('api calls', () => {
     expect(err.code).toBe('stale_audience')
   })
 
+  it('sends send_at only when scheduling', async () => {
+    const calls = mockFetch({ 'POST /api/campaigns/7/approve': () => jsonResponse(200, {}) })
+    await api.approve(7, { tr: {} })
+    await api.approve(7, { tr: {} }, '2026-11-11T09:00:00.000Z')
+    expect(calls.map((c) => c.body)).toEqual([{ contents: { tr: {} } }, { contents: { tr: {} }, send_at: '2026-11-11T09:00:00.000Z' }])
+  })
+
   it('throws ApiError even when the error body is not JSON', async () => {
     mockFetch({ 'GET /api/metrics': () => new Response('bad gateway', { status: 502 }) })
     const err = await api.metrics().catch((e) => e)

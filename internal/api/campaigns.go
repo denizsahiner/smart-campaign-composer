@@ -48,12 +48,14 @@ type campaignView struct {
 	CreatedAt     time.Time               `json:"created_at"`
 	UpdatedAt     time.Time               `json:"updated_at"`
 	ApprovedAt    *time.Time              `json:"approved_at"`
+	ScheduledAt   *time.Time              `json:"scheduled_at"`
 }
 
 func (s *Server) view(c store.Campaign) (campaignView, error) {
 	v := campaignView{
 		ID: c.ID, Brief: c.Brief, Status: c.Status, Contents: c.Contents, ContentErrors: c.ContentErrors,
 		CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt, ApprovedAt: c.ApprovedAt,
+		ScheduledAt: c.ScheduledAt,
 	}
 	if a := c.Audience; a != nil {
 		seg, err := s.validator.Parse(a.Segment)

@@ -251,13 +251,14 @@ func (p progress) fingerprint() string {
 // campaignEvents serves GET /api/campaigns/{id}/events: live delivery counts as SSE.
 // It sends a progress event at once and whenever the counts change, and done (then
 // closes) once the worker has marked the campaign completed, i.e. no message is left
-// pending, sending or scheduled for retry.
+// pending, sending or scheduled for retry. A scheduled campaign streams too: its counts
+// stay pending until the scheduled time, then the status turns approved and they move.
 func (s *Server) campaignEvents(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.campaign(w, r)
 	if !ok {
 		return
 	}
-	if c.Status != store.StatusApproved && c.Status != store.StatusCompleted {
+	if c.Status != store.StatusScheduled && c.Status != store.StatusApproved && c.Status != store.StatusCompleted {
 		writeError(w, http.StatusConflict, "not_approved", "The campaign hasn't been approved, so nothing is being sent.")
 		return
 	}

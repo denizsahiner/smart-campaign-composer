@@ -108,14 +108,40 @@
 
     <section v-if="c.audience && editable" class="section">
       <h2 class="heading">Onay</h2>
-      <p class="muted">Onaylarsanız mesajlar, sahte sağlayıcıya gönderilmek üzere kuyruğa alınır. Bu işlem geri alınamaz.</p>
+      <fieldset class="when">
+        <legend class="sr-only">Gönderim zamanı</legend>
+        <label><input v-model="when" type="radio" value="now" /> Hemen gönder</label>
+        <label><input v-model="when" type="radio" value="later" /> İleri tarihte gönder</label>
+        <div v-if="when === 'later'" class="later">
+          <input v-model="sendAt" type="datetime-local" class="field date" aria-label="Gönderim zamanı (İstanbul saati)"
+            :min="minLocal" :max="maxLocal" />
+          <span class="small muted">İstanbul saati · 09:00–21:00 arası, en geç {{ maxLabel }}</span>
+        </div>
+      </fieldset>
+      <p v-if="when === 'later'" class="muted">
+        Alıcılar ve metinler şimdi sabitlenir; mesajlar seçilen zamanda gönderilmeye başlar. O zamana kadar zamanlamayı iptal edebilirsiniz.
+      </p>
+      <p v-else class="muted">Onaylarsanız mesajlar, sahte sağlayıcıya gönderilmek üzere kuyruğa alınır. Bu işlem geri alınamaz.</p>
       <p v-if="approveError" class="notice error">
         {{ approveError.message }}
         <span v-for="e in approveError.fields" :key="e.path + e.code" class="block">{{ e.path }}: {{ e.message }}</span>
       </p>
       <div class="row">
-        <BaseButton :disabled="!canApprove" :loading="busy === 'approve'" @click="approve">Onayla ve gönder</BaseButton>
+        <BaseButton :disabled="!canApprove" :loading="busy === 'approve'" @click="approve">
+          {{ when === 'later' ? 'Zamanla' : 'Onayla ve gönder' }}
+        </BaseButton>
         <span v-if="!canApprove" class="small muted">{{ approveBlocker }}</span>
+      </div>
+    </section>
+
+    <section v-if="scheduled" class="section notice scheduled">
+      <p><strong>⏱ {{ fmtTime(c.scheduled_at) }} tarihinde gönderilecek.</strong></p>
+      <p v-if="c.audience" class="small">
+        {{ fmt(c.audience.reach.total) }} kişi · SMS {{ fmt(c.audience.reach.sms) }} · E-posta {{ fmt(c.audience.reach.email) }}
+      </p>
+      <p v-if="cancelError" class="notice error">{{ cancelError }}</p>
+      <div class="row">
+        <BaseButton variant="secondary" :loading="busy === 'cancel'" @click="cancelSchedule">Zamanlamayı iptal et</BaseButton>
       </div>
     </section>
 
@@ -130,6 +156,7 @@
     </section>
     <p v-else-if="sending" class="section notice">
       Onaylandı {{ c.approved_at ? new Date(c.approved_at).toLocaleString('tr-TR') : '' }}.
+      <template v-if="c.scheduled_at">Gönderim {{ fmtTime(c.scheduled_at) }} için zamanlanmıştı.</template>
     </p>
 
     <DeliveryProgress v-if="sending" :key="c.id" :campaign-id="c.id" @done="reload" />
@@ -167,12 +194,17 @@ const messageError = ref('')
 const fieldErrors = ref([])
 const approveError = ref(null)
 const queued = ref(null)
+const when = ref('now') // now | later
+const sendAt = ref('') // datetime-local value, Istanbul time
+const cancelError = ref('')
 const logErrors = ref(0)
 const loads = ref(0) // bumped on every (re)load, so the failed recipients list follows
 let abort = null
+let startCheck = null // timer that reloads a scheduled campaign once its time has come
 
 const editable = computed(() => c.value && (c.value.status === 'draft' || c.value.status === 'ready'))
 const sending = computed(() => c.value && (c.value.status === 'approved' || c.value.status === 'completed'))
+const scheduled = computed(() => c.value?.status === 'scheduled')
 const needsAck = computed(() => {
   const a = c.value?.audience
   return !!a && a.unsupported_criteria.length > 0 && !a.unsupported_acknowledged
@@ -207,6 +239,30 @@ const empty = (l) => !drafts.value[l].sms.trim() || !drafts.value[l].email_subje
 // or validation errors.
 const problem = (l) => !drafts.value[l] || over(l) || empty(l) || fieldErrors.value.some((e) => e.path === l || e.path.startsWith(`${l}.`))
 
+// Scheduling rules, as the backend checks them: at least a minute ahead, at most 14 days,
+// 09:00–21:00 Istanbul time. Turkey is UTC+3 all year, so Istanbul wall time is UTC + 3h.
+const TR_OFFSET = 3 * 60 * 60 * 1000
+const MAX_AHEAD = 14 * 24 * 60 * 60 * 1000
+const toLocal = (d) => new Date(d.getTime() + TR_OFFSET).toISOString().slice(0, 16)
+const fromLocal = (v) => new Date(`${v}:00+03:00`)
+const nowTick = ref(Date.now())
+const minLocal = computed(() => toLocal(new Date(nowTick.value + 60 * 1000)))
+const maxLocal = computed(() => toLocal(new Date(nowTick.value + MAX_AHEAD)))
+const maxLabel = computed(() => new Date(nowTick.value + MAX_AHEAD).toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' }))
+const fmtTime = (iso) => new Date(iso).toLocaleString('tr-TR', { timeZone: 'Europe/Istanbul', dateStyle: 'long', timeStyle: 'short' })
+
+const scheduleBlocker = computed(() => {
+  if (when.value !== 'later') return ''
+  if (!sendAt.value) return 'Gönderim zamanını seçin.'
+  const t = fromLocal(sendAt.value).getTime()
+  if (Number.isNaN(t)) return 'Gönderim zamanını seçin.'
+  if (t < nowTick.value + 60 * 1000) return 'Gönderim zamanı en az bir dakika sonrası olmalı.'
+  if (t > nowTick.value + MAX_AHEAD) return 'En fazla 14 gün sonrasına zamanlanabilir.'
+  const hour = Number(sendAt.value.slice(11, 13))
+  if (hour >= 21 || hour < 9) return '21:00–09:00 arasına zamanlanamaz.'
+  return ''
+})
+
 const approveBlocker = computed(() => {
   if (!hasDrafts.value) return 'Önce mesajları üretin.'
   if (needsAck.value) return 'Önce eksik kriterleri onaylayın.'
@@ -214,7 +270,7 @@ const approveBlocker = computed(() => {
   if (missing.value.length) return `Önce ${missingLabel.value} mesajlarını yazın.`
   if (langs.value.some(over)) return 'Bir mesaj karakter sınırını aşıyor.'
   if (langs.value.some(empty)) return 'Tüm mesajları doldurun.'
-  return ''
+  return scheduleBlocker.value
 })
 const canApprove = computed(() => !approveBlocker.value && !busy.value && !generating.value)
 
@@ -231,6 +287,17 @@ function apply(campaign) {
   if (!selected.value.length) selected.value = [...ls]
   loads.value++
   checkLogs()
+  watchStart()
+}
+
+// A scheduled campaign starts when the worker takes its first message, at the scheduled
+// time: reload then, and every few seconds after until it has started, so the progress
+// panel appears by itself.
+function watchStart() {
+  clearTimeout(startCheck)
+  if (c.value?.status !== 'scheduled') return
+  const wait = Math.max(new Date(c.value.scheduled_at).getTime() - Date.now(), 0) + 3000
+  startCheck = setTimeout(reload, Math.min(wait, 2 ** 31 - 1))
 }
 
 // Errors logged for this campaign (a failed Claude call, a message given up on, a 500).
@@ -244,7 +311,12 @@ async function checkLogs() {
 onMounted(async () => {
   try { apply(await api.get(props.id)) } catch (e) { loadError.value = e.message }
 })
-onBeforeUnmount(() => abort?.abort())
+const ticker = setInterval(() => { nowTick.value = Date.now() }, 30 * 1000)
+onBeforeUnmount(() => {
+  abort?.abort()
+  clearTimeout(startCheck)
+  clearInterval(ticker)
+})
 
 // After delivery finishes the campaign is completed; reload so the status badge follows.
 async function reload() {
@@ -315,10 +387,22 @@ async function approve() {
   approveError.value = null
   try {
     const contents = Object.fromEntries(langs.value.map((l) => [l, drafts.value[l]]))
-    const res = await run('approve', () => api.approve(c.value.id, contents))
+    const at = when.value === 'later' ? fromLocal(sendAt.value).toISOString() : undefined
+    const res = await run('approve', () => api.approve(c.value.id, contents, at))
     queued.value = res.queued
     apply(res.campaign)
   } catch (e) { approveError.value = { message: e.message, fields: e.fields || [] } }
+}
+
+async function cancelSchedule() {
+  cancelError.value = ''
+  try {
+    apply(await run('cancel', () => api.cancelSchedule(c.value.id)))
+    queued.value = null
+  } catch (e) {
+    cancelError.value = e.message
+    reload() // e.g. the send started meanwhile: show it
+  }
 }
 </script>
 
@@ -341,4 +425,10 @@ async function approve() {
 .warn-mark { color: var(--warning); margin-left: var(--space-1); }
 .stream { margin: 0; white-space: pre-wrap; background: var(--surface-300); padding: var(--space-3); border-radius: var(--radius-md); }
 .block { display: block; }
+.when { border: 0; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.when label { display: inline-flex; align-items: center; gap: var(--space-2); }
+.later { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding-left: var(--space-6); }
+.date { width: auto; }
+.scheduled p { margin: 0 0 var(--space-2); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>

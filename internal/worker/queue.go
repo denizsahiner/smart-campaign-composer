@@ -26,17 +26,27 @@ type Queue struct{ pool *pgxpool.Pool }
 
 func NewQueue(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 
+// The claim also moves the campaigns of the claimed rows from scheduled to approved: a
+// scheduled campaign's messages become due at its scheduled time, so the first claim of
+// one is the moment its send starts. Same statement, so a cancel (store.CancelSchedule)
+// sees either no message taken and a scheduled campaign, or both changed.
 const claimSQL = `
-UPDATE messages SET status = 'sending', locked_until = now() + $3 * interval '1 millisecond',
-                    attempts = attempts + 1, updated_at = now()
-WHERE id IN (
-  SELECT id FROM messages
-  WHERE channel = $1 AND %s
-  ORDER BY %s
-  LIMIT $2
-  FOR UPDATE SKIP LOCKED
+WITH claimed AS (
+  UPDATE messages SET status = 'sending', locked_until = now() + $3 * interval '1 millisecond',
+                      attempts = attempts + 1, updated_at = now()
+  WHERE id IN (
+    SELECT id FROM messages
+    WHERE channel = $1 AND %s
+    ORDER BY %s
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+  )
+  RETURNING id, campaign_id, channel, to_address, subject, body, attempts
+), started AS (
+  UPDATE campaigns SET status = 'approved', updated_at = now()
+  WHERE id IN (SELECT campaign_id FROM claimed) AND status = 'scheduled'
 )
-RETURNING id, campaign_id, channel, to_address, subject, body, attempts`
+SELECT id, campaign_id, channel, to_address, subject, body, attempts FROM claimed`
 
 var (
 	// Kept as two queries instead of one OR, so each uses its own partial index.

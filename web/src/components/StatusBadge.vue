@@ -8,12 +8,12 @@ const props = defineProps({ status: { type: String, required: true } })
 
 // Status is always dot + label, never color alone.
 const MAP = {
-  draft: 'muted', ready: 'brand', approved: 'success', completed: 'success',
+  draft: 'muted', ready: 'brand', scheduled: 'warning', approved: 'success', completed: 'success',
   pending: 'muted', sending: 'brand', sent: 'success', retry_scheduled: 'warning', failed: 'danger', skipped: 'muted',
   warn: 'warning', error: 'danger',
 }
 const LABELS = {
-  draft: 'Taslak', ready: 'Hazır', approved: 'Onaylandı', completed: 'Tamamlandı',
+  draft: 'Taslak', ready: 'Hazır', scheduled: 'Zamanlandı', approved: 'Onaylandı', completed: 'Tamamlandı',
   pending: 'Bekliyor', sending: 'Gönderiliyor', sent: 'Gönderildi', retry_scheduled: 'Yeniden denenecek', failed: 'Başarısız', skipped: 'Atlandı',
   warn: 'Uyarı', error: 'Hata',
 }

@@ -26,13 +26,14 @@ import (
 const (
 	StatusDraft     = "draft"
 	StatusReady     = "ready"
+	StatusScheduled = "scheduled"
 	StatusApproved  = "approved"
 	StatusCompleted = "completed"
 )
 
 var (
 	ErrNotFound = errors.New("store: campaign not found")
-	// ErrNotEditable means the campaign is approved or completed.
+	// ErrNotEditable means the campaign is scheduled, approved or completed.
 	ErrNotEditable = errors.New("store: campaign can no longer be changed")
 )
 
@@ -59,6 +60,9 @@ type Campaign struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	ApprovedAt    *time.Time
+	// ScheduledAt is when the messages go out, for a campaign approved for a later time;
+	// nil when it was sent at once.
+	ScheduledAt *time.Time
 }
 
 // ContentLanguages are the languages the campaign needs a draft in: those of its audience
@@ -113,7 +117,7 @@ func (s *Store) Create(ctx context.Context, brief string) (int64, error) {
 // language.
 const campaignColumns = `id, brief, status, segment_rule, audience_as_of, audience_total_count,
 	sms_audience_count, email_audience_count, longest_first_name, language_counts, unsupported_criteria,
-	unsupported_acknowledged_at, content_language, created_at, updated_at, approved_at,
+	unsupported_acknowledged_at, content_language, created_at, updated_at, approved_at, scheduled_at,
 	(SELECT jsonb_object_agg(cc.language, jsonb_build_object('sms', cc.sms, 'email_subject', cc.email_subject,
 		'email_body', cc.email_body, 'errors', cc.errors))
 	 FROM campaign_contents cc WHERE cc.campaign_id = campaigns.id)`
@@ -135,7 +139,7 @@ func scanCampaign(row pgx.Row) (Campaign, error) {
 		contents                   map[string]storedContent
 	)
 	err := row.Scan(&c.ID, &c.Brief, &c.Status, &seg, &asOf, &total, &sms, &email, &longest, &langCounts,
-		&unsupported, &ackAt, &legacyLang, &c.CreatedAt, &c.UpdatedAt, &c.ApprovedAt, &contents)
+		&unsupported, &ackAt, &legacyLang, &c.CreatedAt, &c.UpdatedAt, &c.ApprovedAt, &c.ScheduledAt, &contents)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Campaign{}, ErrNotFound
 	}

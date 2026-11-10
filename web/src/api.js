@@ -39,8 +39,12 @@ export const api = {
   rerunAudience: (id, brief) => call('POST', `/api/campaigns/${id}/audience`, { brief }),
   acknowledge: (id) => call('POST', `/api/campaigns/${id}/acknowledge`),
   refreshAudience: (id) => call('POST', `/api/campaigns/${id}/audience/refresh`),
-  // contents: the final draft per language ({tr: {...}, en: {...}}).
-  approve: (id, contents) => call('POST', `/api/campaigns/${id}/approve`, { contents }),
+  // contents: the final draft per language ({tr: {...}, en: {...}}). sendAt (ISO string)
+  // schedules the send; without it the messages go out at once.
+  approve: (id, contents, sendAt) =>
+    call('POST', `/api/campaigns/${id}/approve`, sendAt ? { contents, send_at: sendAt } : { contents }),
+  // Calls off a scheduled send that hasn't started; returns the campaign, ready again.
+  cancelSchedule: (id) => call('POST', `/api/campaigns/${id}/schedule/cancel`),
   metrics: () => call('GET', '/api/metrics'),
   // Recipients the provider rejected for good, newest first: {failures, total, next_before}.
   failures: (id, params) => call('GET', `/api/campaigns/${id}/failures${query(params)}`),
