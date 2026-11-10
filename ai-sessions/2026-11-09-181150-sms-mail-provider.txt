@@ -1,0 +1,2431 @@
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Opus 5.5 · Claude Pro
+ ▝▝   ▝▝   ~/Desktop/smart-campaign-composer
+
+
+❯ şimdi sms ve emaili taklit eden provider ve worker kısmına geçeceğiz.         
+  architecture kısmında eksik kalan bilgi vs var mı?                            
+
+  Read 1 file, listed 1 directory, ran 1 shell command (ctrl+o to expand)
+
+⏺ Evet, var. Mimari belgesi kuyruk ve claim kısmını iyi tanımlıyor ama provider
+  ile worker arasındaki birkaç önemli nokta açık kalmış. En kritik olanlardan
+  başlıyorum. Her madde için önerimi yazdım, ama hiçbirine kendim karar
+  vermedim.
+
+  A. Doğruluğu etkileyen boşluklar
+
+  1. 429 deneme hakkından düşüyor mu?
+  Claim sorgusu her seferinde attempts + 1 yapıyor. Provider'ın %5 rastgele
+  429'u ve kendi 100/s sınırından gelen 429'lar da bu 5 hakkı harcıyor. Yani bir
+  mesaj sırf yavaşlatıldığı için failed olabilir.
+  - Öneri: 429 attempts'ı artırmasın. Ya sayaç geri alınsın ya da artış
+    claim'den sonuca taşınsın. Gerçek hatalar (5xx, timeout) hak harcasın.
+
+  2. Rastgele 429 ile hız sınırı 429'u ayrılmamış.
+  Belgede "429 gelince o kanal Retry-After süresince durur" yazıyor. %5 rastgele
+  429 her seferinde bütün kanalı durdurursa throughput çöker.
+  - Öneri: Kanal sadece provider'ın gerçek hız sınırı 429'unda dursun. Rastgele
+    429'da yalnızca o mesaj retry_scheduled olsun. Bunun için provider iki
+    durumu ayırt edilebilir döndürmeli, örneğin gövdede reason: "rate_limited" /
+    "throttled".
+
+  3. Worker içi eşzamanlılık tanımsız.
+  Gecikme 50–300 ms. Gönderimler sırayla yapılırsa kanal başına yaklaşık 5 msg/s
+  çıkar, 100/s'ye hiç yaklaşılmaz. 100/s için kanal başına aynı anda yaklaşık
+  20–30 istek gerekir.
+  - Öneri: Kanal başına sabit sayıda goroutine (ör. 32). Her biri önce
+    limiter'dan token beklesin.
+
+  4. Claim kanal ayırmıyor.
+  ORDER BY next_attempt_at LIMIT 50 ile gelen batch tamamen e-posta olabilir. Bu
+  sırada SMS limiter'ı boşta kalır.
+  - Öneri: Kanal başına ayrı claim döngüsü (AND channel = $1). Mevcut partial
+    index'e channel eklemek de gerekebilir.
+
+  5. Lease süresi ile sonuç yazımı arasında yarış var.
+  Kanal Retry-After yüzünden durursa ya da limiter kuyruğu uzarsa, 30 saniyelik
+  lease bellekteki mesaj henüz gönderilmeden dolabilir. O zaman başka bir claim
+  aynı satırı tekrar alır. Provider dedup'ı çift gönderimi engelliyor, ama iki
+  taraf da durumu yazmaya çalışır ve sonuncusu kazanır. Örneğin sent olmuş bir
+  satırın üstüne retry_scheduled yazılabilir.
+  - Öneri: Sonuç yazımı koşullu olsun (fencing): WHERE id=$1 AND 
+    status='sending' AND attempts=$n. Ayrıca batch boyutu, lease süresine
+    sığacak kadar küçük tutulsun.
+
+  6. Provider uzun süre çökerse ne olacak?
+  Bağlantı reddi retryable sayılıyor. Backoff toplamı yaklaşık 1+2+4+8 = 15
+  saniye. Provider 20 saniye kapalı kalırsa bütün kuyruk failed olur.
+  - Öneri: Bu kapsamda kabul edip belgeye yazmak yeterli. İstenirse bağlantı
+    hatasında kanal da durdurulabilir.
+
+  B. Provider kontratı tanımsız
+
+  7. HTTP arayüzü yok.
+  Endpoint'ler (POST /sms, POST /email), istek gövdesi (message_id, to, subject,
+  body), başarılı yanıt (provider_message_id) ve hata gövdeleri belgede tanımlı
+  değil.
+
+  8. Kalıcı 4xx hiç üretilmiyor.
+  Worker'da "4xx → hemen failed" yolu var, ama hata enjeksiyon listesinde 4xx
+  yok. Bu yol hiç çalışmaz.
+  - Öneri: Belirli numara ya da adreslerde 400 dönsün, örneğin seed'deki sabit
+    bir edge-case kullanıcı. Bu deterministik olduğu için testlerde ve demoda
+    görünür. Alternatif olarak küçük bir oranda rastgele 400 de olabilir.
+
+  9. Timeout'un anlamı belirsiz.
+  Provider timeout'ta mesajı kaydedip sonra mı takılıyor, yoksa hiç işlemeden
+  mi? Dedup'ı gerçekten göstermek için "kaydet, sonra yanıtı geciktir" olmalı.
+  Worker'ın HTTP timeout değeri de belgede yok (ör. 5 s); enjekte edilen gecikme
+  bunun üstünde olmalı.
+
+  10. Idempotency kuralının ayrıntıları eksik.
+  - Hata sonuçları önbelleğe alınmamalı. Alınırsa ilk 500 sonsuza kadar tekrar
+    döner.
+  - Aynı message_id ile eşzamanlı iki istek gelirse ne olacak?
+  - Dedup kaydı bellekte tutuluyor, provider yeniden başlarsa kaybolur. Bunu
+    sınırlama olarak belgeye yazmak yeterli.
+
+  11. Provider'ın hız sınırı algoritması tanımlı değil.
+  Worker'ın token bucket'ı (burst değeri?) ile provider'ın sınırı (sabit pencere
+  mi, token bucket mı?) tam 100/s'de çalışırsa pencere kayması yüzünden sürekli
+  429 alınır.
+  - Öneri: Worker'ın hedefi provider sınırının biraz altında olsun (ör. 95/s,
+    burst 1–5), ya da provider biraz burst toleransı tanısın.
+
+  12. "Kimse iki kez almadı" testi nasıl doğrulanacak?
+  DB'deki UNIQUE kısıtı bunu kanıtlamaz, çünkü asıl risk provider tarafında.
+  Provider kaç kez gerçekten gönderdiğini (message_id → teslim sayısı) bir uç
+  noktada açmalı, ör. GET /stats ya da /deliveries. End-to-end test bunu kontrol
+  eder.
+
+  13. Çalıştırma ayrıntıları eksik.
+  Provider aynı binary'de mi olacak (./app mock-provider), env değişken adları
+  neler, healthcheck nasıl yapılacak, worker ile mock-provider arasındaki
+  depends_on sırası ne olacak? docker-compose.yml'de şu an yalnızca postgres,
+  migrate ve api var.
+
+  C. İzleme ve küçük tutarsızlıklar
+
+  14. Worker'ın sağlığı görünmüyor.
+  Case "health check endpoints" (çoğul) istiyor, ama worker HTTP açmıyor.
+  Seçenekler: worker küçük bir /healthz açsın, ya da DB'ye heartbeat yazsın ve
+  API bunu /metrics'te göstersin. Ben heartbeat'i öneriyorum, dashboard "worker
+  son görülme: 2 sn önce" gösterebilir.
+
+  15. API tablosunda iki satır eksik.
+  GET /api/campaigns/{id}/events (SSE) ve GET /metrics tabloda yok.
+
+  16. Index adı tutarsız.
+  SSE bölümü messages (campaign_id, status) index'ini anıyor, migration'daki ise
+  (campaign_id, channel, status).
+
+  17. Jitter tipi farklı.
+  LLM tarafında "equal jitter" kullanılıyor, gönderimde "± jitter". Aynısı mı
+  olacak, belgede netleşmeli.
+
+  Bana en önemli görünenler 1, 2, 3, 5, 8 ve 12: bunlar kod yazmadan önce karar
+  gerektiriyor. Önerilerime katılıyor musun, yoksa farklı yapmak istediğin bir
+  madde var mı? Kararlar netleşince mimari belgesini ve DECISIONS.md'yi
+  güncelleyip koda geçerim.
+
+✻ Worked for 1m 8s · done 1:46 PM
+
+※ recap: Mock SMS/e-posta provider'ı ve worker'ı yazmadan önce mimari belgesini kontrol ettim ve 17 boşluk buldum. En kritikleri: 429'un deneme hakkından düşmesi, kanal başına eşzamanlılık ve kalıcı 4xx üretimi. Senin onayını bekliyorum. (disable recaps in /config)
+
+❯ 1: 429 olursa attempts artmasın, diğer hatalarda artabilir. 2: rastgele 429   
+  zaten gerçek senaryoyu simüle etmek için kullandığımız bir yöntem değil mi?   
+  rastgele ve gerçek senaryoda farklı hareket etmiyor olmamız lazım? rastgele   
+  429 oluşturma yapımızda bir problem var gibi o zaman? 3: kanal başına sabit   
+  sayıda goroutine mantıklı. 4: bu kısmı daha detaylı anlat. 5: sonuç koşullu   
+  olsun ve batch küçük tutulsun katılıyorum. 6: bu şekilde olması daha gerçekçi 
+  ve doğru değil mi? 7: endpointleri dediğin gibi sms ve email olarak yazalım.  
+  request ve body oluştururken bana tekrar sor eklemen veya çıkarman gereken    
+  bir şey görürsem düzelteceğim. 8: rastgeleden ziyade belirli numara ve        
+  adreslerde 400 döndürelim. 9: bunu daha detaylı konuşalım. 10: hata           
+  sonuçlarını önbelleğe almamalıyız evet, ilkini işleyip ikincisine in proccess 
+  gibi bir şey desek? 11: dediğini yapabiliriz ama bunun sebebini ve mantığını  
+  detaylı anlatır mısın? 12: deliveries ep ekleyelim. 13: aynı binary'de        
+  olsun. env'de db_url, api keyler, portlar, error rate, max attempts gibi      
+  variablelar olacak. eksik kısımları tamamla tamamlayamazsan ben sana          
+  söyleyeceğim. 14: case ep istediği için küçük bir healthz açabiliriz gibi?    
+  sen ne dersin? 15: tabloya ekleyelim. 16: migrationdaki halini kullanalım.    
+  17: ne farkları var açıkla?                                                   
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+⏺ Hepsine tek tek cevap veriyorum. Belgeye henüz bir şey yazmadım. Açık maddeler
+  (2, 4, 6, 7, 9, 10, 11, 13, 14, 17) netleşince mimari belgesini ve
+  DECISIONS.md'yi tek seferde güncelleyeceğim.
+
+  Netleşenler (belgeye bu haliyle yazacağım)
+
+  - 1. 429'da deneme hakkı düşmez. attempts sayacı claim sırasında artmaya devam
+    eder; 429 gelirse sonuç yazılırken 1 geri alınır. Artışı claim'den sonuç
+    anına taşımayı seçmedim. Sebebi: worker'ı çökerten bir mesaj olursa, sayaç
+    hiç artmadığı için sonsuza kadar yeniden denenir.
+  - 3. Her kanal için sabit sayıda goroutine çalışacak.
+  - 5. Sonuç yazımı koşullu olacak (WHERE id=$1 AND status='sending' AND 
+    attempts=$n) ve batch küçük tutulacak.
+  - 12. Provider'a GET /deliveries eklenecek.
+  - 15. API tablosuna GET /api/campaigns/{id}/events ve GET /metrics eklenecek.
+  - 16. Belgede migration'daki index kullanılacak: (campaign_id, channel, 
+    status).
+
+  2. Rastgele 429
+
+  Haklısın, ayrımı önermem hataydı. Gerçek bir provider'ın 429'unun neden
+  geldiğini istemci bilemez. Worker her 429'a aynı tepkiyi vermeli.
+
+  Asıl sorun simülasyonun kendisinde. Kanal başına 100 msg/s gönderiyoruz. Her
+  isteğin %5 ihtimalle 429 alması saniyede yaklaşık 5 tane 429 demek.
+  Retry-After HTTP'de tam saniye cinsinden olduğu için en az 1 sn. Her 429'da
+  kanal duruyorsa kanal neredeyse hiç çalışmaz. Gerçek provider'lar böyle
+  davranmaz: kısıtlama tek tek isteklerde rastgele değil, kısa dönemler halinde
+  gelir ("şu an yoğunuz, 2 sn bekle").
+
+  Öneri:
+  - Provider: 429 iki kaynaktan gelir:
+    - kanal başına hız sınırının aşılması (bu kendiliğinden olur),
+    - rastgele "throttle dönemleri". Örneğin ortalama her 30 sn'de bir, 2 sn
+      boyunca o kanaldaki bütün istekler 429 alır ve Retry-After dönemin kalan
+      süresini söyler.
+  - Worker: Her 429'da aynı şeyi yapar. Mesaj retry_scheduled olur,
+    next_attempt_at = now + Retry-After atanır, hak düşmez ve kanal Retry-After
+    süresince durur.
+
+  4. Kanal başına claim (detay)
+
+  Şu anki claim sorgusu kanal ayırmıyor: ORDER BY next_attempt_at LIMIT 50.
+  Approve sırasında bütün satırlar aynı transaction'da aynı now() ile yazılıyor,
+  yani hepsinin next_attempt_at değeri aynı. Hangi satırların önce geleceği
+  belirsiz.
+
+  Örnek senaryo: 3000 e-posta ve 1000 SMS var, ilk batch'teki 50 satırın 45'i
+  e-posta.
+  - Kanallar ayrı limiter ve ayrı goroutine havuzu kullanıyorsa, SMS havuzu 5
+    satırı birkaç ms'de bitirir ve sonraki claim'i bekler. SMS kapasitesi boşa
+    gider.
+  - E-posta kanalı bir 429 yüzünden 2 sn dururken, claim edilmiş e-posta
+    satırları bellekte bekler. Lease süresi dolmaya yaklaşır, SMS de bu batch
+    bitmeden yeni iş alamaz. Bir kanalın sorunu diğerini yavaşlatır.
+
+  Kanal başına claim'de her kanalın kendi döngüsü olur:
+
+  SMS döngüsü:    claim(channel='sms', limit=boş_kapasite) → SMS havuzu  → SMS 
+  limiter
+  E-posta döngüsü: claim(channel='email', ...)              → e-posta havuzu → 
+  e-posta limiter
+
+  Her döngü yalnızca kendi havuzunda boş yer varken claim eder. Böylece bellekte
+  bekleyen satır sayısı havuz boyutuyla sınırlı kalır, bu da 5. maddedeki lease
+  riskini küçültür. Bir kanalın durması diğerini hiç etkilemez.
+
+  Maliyeti: sorguya AND channel = $1 eklenir ve index buna uygun hale getirilir.
+  Partial index (channel, next_attempt_at) olur; bunun için yeni bir migration
+  (00004) gerekir.
+
+  6. Provider uzun süre çökerse
+
+  Tek tek mesajlar için "5 denemeden sonra failed" doğru bir davranış. Ama
+  provider tamamen erişilemezken bu bence gerçekçi değil. Gerçek sistemlerde 20
+  saniyelik bir provider kesintisi 4000 mesajı failed yapmaz. Bu durumda sorun
+  mesajlarda değil provider'da, ve pazarlamacının kampanyayı yeniden göndermesi
+  gerekirdi. Bu yüzden genelde circuit breaker kullanılır.
+
+  Öneri (basit hali): 429 için yazacağımız "hak düşmeden yeniden planla ve
+  kanalı durdur" yolunu bağlantı hatalarında da kullanmak.
+  - Provider'a hiç ulaşılamazsa (connection refused / DNS): mesajın gitmediği
+    kesin ve mesajın bir kusuru yok. Hak düşmez, kanal artan sürelerle durur (1,
+    2, 4… en fazla 30 sn).
+  - 5xx ve timeout'ta hak düşmeye devam eder. Bu hatalarda istek provider'a
+    ulaşmış olabilir.
+
+  Diğer seçenek: mevcut davranışı sınırlama olarak belgeye yazmak. Hangisini
+  tercih edersin?
+
+  7. İstek ve yanıt gövdesi taslağı (düzelt)
+
+  POST /sms
+  {"message_id": "1842", "to": "+905321234567", "body": "Merhaba Ayşe, ..."}
+
+  POST /email
+  {"message_id": "1843", "to": "ayse.yilmaz.17@example.com", "subject": "...", 
+  "body": "..."}
+
+  ┌─────────────────────┬─────────┬─────────────────────────────────────────┐
+  │        Durum        │   Kod   │                  Gövde                  │
+  ├─────────────────────┼─────────┼─────────────────────────────────────────┤
+  │ Gönderildi          │ 200     │ {"provider_message_id": "sms_9f2c…",    │
+  │                     │         │ "duplicate": false}                     │
+  ├─────────────────────┼─────────┼─────────────────────────────────────────┤
+  │ Aynı id daha önce   │ 200     │ aynı provider_message_id, "duplicate":  │
+  │ gönderilmiş         │         │ true                                    │
+  ├─────────────────────┼─────────┼─────────────────────────────────────────┤
+  │ Geçersiz alıcı      │ 400     │ {"error": "invalid_recipient",          │
+  │                     │         │ "message": "…"}                         │
+  ├─────────────────────┼─────────┼─────────────────────────────────────────┤
+  │ Eksik veya bozuk    │ 400     │ {"error": "invalid_request", …}         │
+  │ alan                │         │                                         │
+  ├─────────────────────┼─────────┼─────────────────────────────────────────┤
+  │ Aynı id hâlâ        │ 409     │ {"error": "in_progress"}                │
+  │ işleniyor           │         │                                         │
+  ├─────────────────────┼─────────┼─────────────────────────────────────────┤
+  │ Kısıtlama           │ 429     │ Retry-After: 2 header'ı + {"error":     │
+  │                     │         │ "rate_limited"}                         │
+  ├─────────────────────┼─────────┼─────────────────────────────────────────┤
+  │ Sunucu hatası       │ 500/503 │ {"error": "provider_error"}             │
+  └─────────────────────┴─────────┴─────────────────────────────────────────┘
+
+  Gözden geçirmeni istediğim noktalar:
+  - message_id'yi gövdede string olarak koydum. Alternatifi Idempotency-Key
+    header'ı (Stripe tarzı).
+  - Provider'da kimlik doğrulama yok. "API keyler" derken provider için sahte
+    bir PROVIDER_API_KEY mi istiyorsun? Olursa 401 alınır ve bu kalıcı bir hata
+    sayılır.
+
+  8. Belirli numara ve adreslere 400
+
+  Provider'ın kuralları:
+  - SMS: numara Türkiye cep formatına uymazsa (^\+905\d{9}$) 400.
+  - E-posta: domain .invalid ile bitiyorsa 400. Bu TLD RFC 2606'ya göre asla
+    gerçek değil.
+
+  Seed'e İstanbul'da, son 7 günde sepete ürün eklemiş, iki kanalda da izni olan
+  iki edge-case kullanıcı eklenir: biri +90000… gibi geçersiz bir numarayla,
+  diğeri …@bounce.invalid adresiyle. Böylece örnek brief'te her zaman 1 kalıcı
+  SMS hatası ve 1 kalıcı e-posta hatası görünür.
+
+  Bir yan etkisi var: rastgele üretilen kullanıcı sayısı 2 azalır ve RNG sırası
+  değişir. Seed'deki sayılara bağlı testler varsa onları güncellemem gerekir.
+
+  9. Timeout
+
+  Sistemde iki ayrı süre var:
+  - Worker'ın HTTP timeout'u (öneri 3 sn, env ile ayarlanır). Provider
+    gecikmesinin üst sınırı 300 ms olduğu için bol pay kalıyor.
+  - Provider'ın enjekte ettiği "takılma". Provider, istemci bağlantıyı kesene
+    kadar bekler (r.Context().Done(), güvenlik için en fazla 30 sn). Böylece
+    süre worker'ın timeout'una bağlı kalmaz.
+
+  Takılma iki farklı yerde olabilir:
+  - (a) İşlemeden önce takılır: mesaj gitmez, worker timeout görür, yeniden
+    dener ve gönderir. Normal bir retry.
+  - (b) Teslimi kaydettikten sonra takılır: mesaj gitmiş, ama worker bunu
+    bilmiyor. Worker yeniden dener, provider aynı message_id'yi tanır ve 200 
+    duplicate:true döner. Worker satırı sent yapar ve /deliveries 1 teslim
+    gösterir. "Aynı kişiye iki kez gitmez" garantisini asıl kanıtlayan senaryo
+    bu.
+
+  Öneri: timeout enjekte edildiğinde (a) ve (b) yarı yarıya seçilsin. Timeout
+  worker tarafında retryable bir hata olarak kalır ve hak düşer.
+
+  Bir kısıt daha: lease süresi (30 sn), HTTP timeout ile limiter'da bekleme
+  süresinin toplamından büyük olmalı. Belgeye bunu da yazacağım.
+
+  10. In-progress
+
+  Fikrine katılıyorum. Provider her message_id için bir kayıt tutar:
+  - İlk istek geldiğinde kayıt in_progress olur.
+  - Gönderim başarılı olursa kayıt sent olur ve provider_message_id saklanır.
+  - Gönderim hata ile biterse (5xx, 429) kayıt silinir. Böylece hata sonuçları
+    önbellekte kalmaz.
+  - Aynı id ile ikinci bir istek gelirse: kayıt in_progress ise 409 in_progress,
+    sent ise 200 duplicate:true döner.
+
+  Dikkat edilmesi gereken nokta: worker'da "diğer 4xx kalıcıdır" kuralı var,
+  409'un bu kuraldan ayrı tutulması gerekiyor.
+  - Öneri: 409 retryable sayılsın ve hak düşsün. Çok nadir olur: ancak lease
+    süresi dolarsa ya da worker'ın timeout'u provider işi bitirmeden dolarsa
+    görülür. Bunun için sonsuz döngü riski taşıyan "hak düşmeyen" bir yol açmaya
+    gerek yok.
+  - Dedup kaydı bellekte tutulduğu için provider yeniden başlarsa kaybolur. Bunu
+    sınırlama olarak belgeye yazacağım.
+
+  11. Hız sınırı payı (detay)
+
+  Kısaca: iki taraf aynı limiti farklı yöntemlerle ölçüyor. Worker kurala uyduğu
+  halde provider'ın "fazla" saydığı anlar oluyor.
+
+  Worker'daki token bucket (rate.Limiter, 100/s, burst B):
+  - Kovada en fazla B jeton olur ve her 10 ms'de bir jeton eklenir.
+  - Her gönderim bir jeton harcar. Kova doluysa B mesaj aynı anda çıkabilir,
+    sonrasında gönderimler 10 ms arayla gider.
+
+  Provider'daki sabit pencere ("bu saniyede kaç istek geldi?"):
+  - Saat 12:00:00.000–12:00:00.999 arası bir pencere, sonraki saniye yeni bir
+    pencere.
+
+  Uyumsuzluk örnekleri:
+  1. Worker'ın kovası dolu başlar (B = 10). İlk saniyede 10 + 100 = 110 istek
+     gönderir. Provider 10 tanesine 429 döner.
+  2. Burst B = 1 olsa bile, düzgün 100/s akışta 1 saniyelik bir pencereye 101
+     istek düşebilir (çit direği etkisi).
+  3. Provider'ın gecikmesi 50–300 ms. Provider sayımı isteğin ulaştığı anda
+     değil de gecikmeden sonra yaparsa, düzgün gönderilmiş istekler pencerelere
+     düzensiz düşer: bir pencereye 120, sonrakine 80.
+
+  Sonuç: worker kuralı çiğnemediği halde gürültü niteliğinde 429'lar alır. Bu
+  429'lar kanalı durdurduğu için throughput da düşer.
+
+  Case'teki "en fazla 100/s" kuralı bizim yükümlülüğümüz. Provider'ın limiti ise
+  bizim 429 tepkimizi test etmek için var. Öneri:
+  - Worker: 100/s, burst 1. Kurala harfiyen uyar.
+  - Provider: sabit pencere yerine aynı algoritmayı kullanır: 100/s token
+    bucket, burst 10. Sayım istek ulaştığı anda, gecikmeden önce yapılır. Kurala
+    uyan bir istemci hiç 429 almaz; gelen 429'lar yalnızca throttle
+    dönemlerinden gelir (2. madde).
+  - Testlerde: provider limiti env ile düşürülür (ör. 50/s) ve "limit
+    aşıldığında 429" yolu da test edilir.
+
+  Bu, benim ilk önerdiğim "worker 95/s'de çalışsın" seçeneğinden daha temiz:
+  ölçüm farkını yamamıyor, ortadan kaldırıyor.
+
+  13. Env değişkenleri (eksikleri tamamladım, kontrol et)
+
+  Değişken: DATABASE_URL
+  Varsayılan: compose'da
+  Kim kullanır: migrate, api, worker
+  ────────────────────────────────────────
+  Değişken: API_ADDR
+  Varsayılan: :8080
+  Kim kullanır: api
+  ────────────────────────────────────────
+  Değişken: ANTHROPIC_API_KEY, LLM_PROVIDER, ANTHROPIC_MODEL, LLM_EFFORT_*,
+    LLM_REFUSAL_FALLBACK
+  Varsayılan: (mevcut)
+  Kim kullanır: api
+  ────────────────────────────────────────
+  Değişken: PROVIDER_URL
+  Varsayılan: http://mock-provider:8090
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: WORKER_HEALTH_ADDR
+  Varsayılan: :8081
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: WORKER_RATE_PER_CHANNEL
+  Varsayılan: 100
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: WORKER_CONCURRENCY_PER_CHANNEL
+  Varsayılan: 32
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: WORKER_BATCH_SIZE
+  Varsayılan: 20
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: WORKER_LEASE
+  Varsayılan: 30s
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: WORKER_MAX_ATTEMPTS
+  Varsayılan: 5
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: WORKER_BACKOFF_BASE
+  Varsayılan: 1s
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: WORKER_HTTP_TIMEOUT
+  Varsayılan: 3s
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: WORKER_POLL_INTERVAL
+  Varsayılan: 200ms (kuyruk boşken)
+  Kim kullanır: worker
+  ────────────────────────────────────────
+  Değişken: PROVIDER_ADDR
+  Varsayılan: :8090
+  Kim kullanır: mock-provider
+  ────────────────────────────────────────
+  Değişken: PROVIDER_RATE_PER_CHANNEL
+  Varsayılan: 100
+  Kim kullanır: mock-provider
+  ────────────────────────────────────────
+  Değişken: PROVIDER_ERROR_RATE
+  Varsayılan: 0.05 (5xx)
+  Kim kullanır: mock-provider
+  ────────────────────────────────────────
+  Değişken: PROVIDER_TIMEOUT_RATE
+  Varsayılan: 0.01
+  Kim kullanır: mock-provider
+  ────────────────────────────────────────
+  Değişken: PROVIDER_THROTTLE_EVERY / PROVIDER_THROTTLE_FOR
+  Varsayılan: 30s / 2s
+  Kim kullanır: mock-provider
+  ────────────────────────────────────────
+  Değişken: PROVIDER_LATENCY_MIN_MS / MAX_MS
+  Varsayılan: 50 / 300
+  Kim kullanır: mock-provider
+  ────────────────────────────────────────
+  Değişken: PROVIDER_SEED
+  Varsayılan: boş (rastgele)
+  Kim kullanır: mock-provider; testlerde sabitlenir
+
+  Portlar: api 8080 ve provider 8090 host'a açılır, böylece /deliveries
+  tarayıcıdan görülebilir. Worker'ın 8081 portu yalnızca compose ağı içinde
+  kalır.
+
+  Compose sırası: mock-provider, worker'dan önce sağlıklı olmalı (depends_on: 
+  mock-provider: service_healthy).
+
+  14. Worker healthz
+
+  Katılıyorum, küçük bir /healthz açalım. Yalnızca "süreç ayakta" demesin,
+  gerçek durumu yansıtsın:
+  - DB ping başarılıysa ve
+  - her iki kanalın claim döngüsü son 10 sn içinde en az bir kez döndüyse (iş
+    olmasa bile) 200 döner.
+
+  Döngü bir yerde takılırsa 503 döner. Compose healthcheck /app healthcheck 
+  <url> ile bu adresi çağırır. Provider'a da bir /healthz eklenir.
+
+  Bir sınırlama var: dashboard worker'a doğrudan erişemez. Worker'ın durumunu
+  UI'da göstermek istersen API'nin /metrics endpoint'i worker'ın /healthz
+  adresini çağırıp sonucu ekleyebilir. Bunu istiyor musun?
+
+  17. Jitter türleri
+
+  Hesaplanan gecikme d olsun (ör. 4 sn):
+
+  ┌─────────────┬──────────────┬─────────────┬─────────────────────────────┐
+  │     Tür     │   Bekleme    │ Örnek (d =  │           Özellik           │
+  │             │              │    4 sn)    │                             │
+  ├─────────────┼──────────────┼─────────────┼─────────────────────────────┤
+  │ Full        │ rand(0, d)   │ 0–4 sn      │ En iyi dağılım, ama bekleme │
+  │             │              │             │  ~0'a düşebilir             │
+  ├─────────────┼──────────────┼─────────────┼─────────────────────────────┤
+  │ Equal       │ d/2 +        │ 2–4 sn      │ En az d/2 bekleme           │
+  │             │ rand(0, d/2) │             │ garantili, dağılım orta     │
+  ├─────────────┼──────────────┼─────────────┼─────────────────────────────┤
+  │ ±           │ d × (1 ±     │ 3.2–4.8 sn  │ d'ye yakın kalır, dağılım   │
+  │ (simetrik)  │ 0.2)         │             │ en az                       │
+  └─────────────┴──────────────┴─────────────┴─────────────────────────────┘
+
+  Jitter'ın amacı şu: provider kısa bir süre 5xx dönerse yüzlerce mesaj aynı
+  anda hata alır. Hepsi tam d sonra yeniden denenirse provider'a hep birlikte
+  yüklenirler.
+
+  Bizim durumumuzda limiter sürüyü zaten 100/s'ye yayıyor, o yüzden üç tür
+  arasındaki fark küçük.
+
+  Öneri: iki taraf da equal jitter kullansın. Hem LLM hem worker için tek bir
+  backoff fonksiyonu olur, belge tutarlı kalır ve beklemenin anlamsız biçimde
+  ~0'a düşmesi engellenir.
+
+  ---
+
+  Senden beklediğim cevaplar: 2, 4, 9, 10, 11 ve 17'deki önerilere onay; 6'da
+  hangi seçenek; 7'de istek/yanıt gövdesine düzeltmelerin ve provider API key'i
+  isteyip istemediğin; 13'teki env listesine itirazın; 14'te UI'da worker durumu
+  gösterilsin mi.
+
+✻ Worked for 2m 18s · done 2:47 PM
+
+※ recap: Hedef, SMS ve e-postayı taklit eden mock provider ile worker'ın tasarımını netleştirip mimari belgesine yazmak. Sıradaki adım senin kararların: 6'da hangi seçeneği istediğin, 7'deki istek/yanıt gövdeleri, 13'teki env listesi ve 2, 4, 9, 10, 11, 14, 17'deki önerilere onay. (disable recaps in /config)
+
+❯ 2: önerini uygula mantıklı. 6: birinci seçenekten devam. 7: message id string 
+  olarak kalsın. hayır kimlik doğrulama ekleme. anthropic vs için demiştim      
+  onu. 8: evet ekleylim bu yanlış kullanıcıları. 9: önerini uygula. 10: önerini 
+  uygula. 14: istiyorum. 17: equal jitter kullanalım. 4'ü de onaylıyorum        
+
+⏺ User answered Claude's questions:
+  ⎿  · Madde 11 (hız sınırı payı) için önerim: worker 100/s token bucket burst 
+     1; provider da sabit pencere yerine 100/s token bucket burst 10, sayım 
+     gecikmeden önce; testlerde provider limiti env ile düşürülür. Onaylıyor 
+     musun? → Onaylıyorum (Recommended)
+     · Madde 13'teki env listesi (WORKER_* ve PROVIDER_* değişkenleri, portlar 
+     8080/8090 host'a açık, 8081 içeride) uygun mu? → Uygun (Recommended)
+
+  Made 1 scratchpad edit +236, searched for 1 pattern, ran 2 shell commands (ctrl+o to expand)
+
+⏺ Bash(S=/private/tmp/claude-501/-Users-denizsahiner-Desktop-smart-campaign-comp
+      oser/d20b2a9c-d4e1-4af2-9a2e-a038f5a34d48/scratchpad && sed -i '' 's/^-
+      Order of checks…)
+  ⎿  581:- Order of checks per request: validate the request → idempotency
+     → rate limit and
+     582-  throttle window → injected failure → latency → record the delive
+     … +15 lines (ctrl+o to expand)
+  ⎿  Updated docs/ARCHITECTURE_DRAFT.md (+174 -46)
+      382    (see the retry strategy below for intermediate states).
+      383  
+      384  - How does the worker claim rows, and what if it crashes mid-s
+           end?
+      385 -  The worker claims a small batch in a short transaction, then
+          - sends outside of it                                          
+      386 -  (no DB transaction is held open during the HTTP call):      
+      385 +  Each channel runs its own loop with its own claim query, its
+          + own pool of send                                             
+      386 +  goroutines (`WORKER_CONCURRENCY_PER_CHANNEL`, default 32) an
+          +d its own rate limiter. A                                     
+      387 +  loop claims only when its pool has free slots, and at most t
+          +hat many rows (capped by                                      
+      388 +  `WORKER_BATCH_SIZE`, default 20), so claimed-but-unsent rows
+          + never pile up in memory.                                     
+      389 +  The pool is what makes 100 msg/s reachable: with 50–300 ms p
+          +rovider latency, 5–30                                         
+      390 +  sends are in flight per channel, while one sequential sender
+          + would manage about 5/s.                                      
+      391 +                                                              
+      392 +  Why one loop per channel: rows queued by the same approve sh
+          +are the same                                                  
+      393 +  `next_attempt_at`, so a shared `ORDER BY next_attempt_at LIM
+          +IT n` claim returns them in                                   
+      394 +  no particular order. A batch could be almost all email while
+          + the SMS pool idles, and an                                   
+      395 +  email channel paused by a 429 would hold the SMS rows of the
+          + same batch until their                                       
+      396 +  lease ran out. With separate loops, a pause or a backlog on 
+          +one channel is invisible to                                   
+      397 +  the other.                                                  
+      398 +                                                              
+      399 +  The claim runs in a short transaction; the HTTP call happens
+          + outside it:                                                  
+      400    ```sql
+      388 -  UPDATE messages SET status = 'sending', locked_until = now()
+          - + interval '30 seconds',                                     
+      401 +  UPDATE messages SET status = 'sending', locked_until = now()
+          + + $lease,                                                    
+      402                        attempts = attempts + 1, updated_at = no
+           w()
+      403    WHERE id IN (
+      404      SELECT id FROM messages
+      392 -    WHERE status IN ('pending', 'retry_scheduled') AND next_at
+          -tempt_at <= now()                                             
+      405 +    WHERE channel = $1 AND status IN ('pending', 'retry_schedu
+          +led')                                                         
+      406 +      AND next_attempt_at <= now()                            
+      407      ORDER BY next_attempt_at
+      394 -    LIMIT 50                                                  
+      408 +    LIMIT $2                                                  
+      409      FOR UPDATE SKIP LOCKED
+      410    )
+      411    RETURNING *;
+      412    ```
+      399 -  A second, identical claim runs with `WHERE status = 'sending
+          -' AND locked_until < now()`                                   
+      400 -  (lease expired: worker died). The two conditions are kept as
+          - separate queries instead of                                  
+      401 -  one `OR`, so each can use its own partial index (see Data → 
+          -Indexes).                                                     
+      402 -  `SKIP LOCKED` keeps concurrent claimers from grabbing the sa
+          -me row. If the worker crashes                                 
+     … 238 more lines (ctrl+o to expand)
+
+⏺ Mimari belgesindeki gönderim, izleme ve provider bölümlerini yeniden yazdım;
+  şimdi Services, API tablosu, index'ler ve seed kısmındaki küçük düzeltmeleri
+  yapıyorum.
+
+⏺ Bash(python3 - <<'EOF'
+      p='docs/ARCHITECTURE_DRAFT.md'…)
+  ⎿  11:- One Go binary, three long-running entrypoints (`./app api`, `./ap
+     p worker`,
+     82:  profile (passive / cart abandoner / buyer / stale cart / returnin
+     … +5 lines (ctrl+o to expand)
+  ⎿  Updated docs/ARCHITECTURE_DRAFT.md (+45 -9)
+       8  
+       9  ## Services
+      10  - Containers run in docker compose: postgres, api, worker, mock
+          -provider, frontend
+      11 -- One Go binary, two entrypoints (`./app api`, `./app worker`),
+         - run as two separate containers.                               
+      12 -  Shares the same models, LLMClient, and validation code. Kept 
+         -as one binary to avoid duplicating that code; run as separate c
+         -ontainers so a crash in one doesn't take down the other.       
+      11 +- One Go binary, three long-running entrypoints (`./app api`, `
+         +./app worker`,                                                 
+      12 +  `./app mock-provider`), each its own container. Shares the sa
+         +me models, LLMClient, and                                      
+      13 +  validation code. Kept as one binary to avoid duplicating that
+         + code; run as separate                                         
+      14 +  containers so a crash in one doesn't take down the others.   
+      15  - A third entrypoint, `./app migrate`, runs as a one-shot `migr
+          ate` service: applies the
+      16    schema and loads a deterministic seed (fixed random seed, so 
+          tests and demos see the same
+      17    data; the example brief is guaranteed to match more than 0 us
+          ers).
+      18  - Startup order: `postgres` (healthcheck: `pg_isready`) → `migr
+          ate`
+      19    (`depends_on: postgres: service_healthy`) → `api` and `worker
+          `
+      20    (`depends_on: migrate: service_completed_successfully`). Kept
+           separate from API startup so
+      19 -  API restarts don't re-run migrations and responsibilities sta
+         -y clear.                                                       
+      21 +  API restarts don't re-run migrations and responsibilities sta
+         +y clear. `worker` also                                         
+      22 +  waits for `mock-provider: service_healthy`.                  
+      23  - `frontend`: the Vue app is built and served by nginx, which p
+          roxies `/api` to the API
+      24    (no CORS setup needed).
+      25  - Graceful shutdown: on SIGTERM the worker stops claiming, fini
+          shes its in-flight batch
+      26    and exits; anything left in `sending` is recovered by lease e
+          xpiry. The API drains
+      27    open requests and closes SSE streams.
+      28  
+      29 +## Configuration                                               
+      30 +Environment variables, all with working defaults (`.env.example
+         +` lists them):                                                 
+      31 +                                                               
+      32 +| Variable | Default | Used by |                               
+      33 +|---|---|---|                                                  
+      34 +| `DATABASE_URL` | set in compose | migrate, api, worker |     
+      35 +| `API_ADDR` | `:8080` | api |                                 
+      36 +| `ANTHROPIC_API_KEY`, `LLM_PROVIDER`, `ANTHROPIC_MODEL`, `LLM_
+         +EFFORT_AUDIENCE`, `LLM_EFFORT_MESSAGES`, `LLM_REFUSAL_FALLBACK`
+         + | see LLM | api |                                             
+      37 +| `PROVIDER_URL` | `http://mock-provider:8090` | worker |      
+      38 +| `WORKER_HEALTH_ADDR` | `:8081` | worker |                    
+      39 +| `WORKER_RATE_PER_CHANNEL` | `100` | worker |                 
+      40 +| `WORKER_CONCURRENCY_PER_CHANNEL` | `32` | worker |           
+      41 +| `WORKER_BATCH_SIZE` | `20` | worker |                        
+      42 +| `WORKER_LEASE` | `30s` | worker |                            
+      43 +| `WORKER_MAX_ATTEMPTS` | `5` | worker |                       
+      44 +| `WORKER_BACKOFF_BASE` | `1s` | worker |                      
+     … 62 more lines (ctrl+o to expand)
+
+⏺ Bash(python3 - <<'EOF'
+      p='docs/ARCHITECTURE_DRAFT.md'…)
+  ⎿    creating an approved campaign with no messages.
+     - The response reports messages queued per channel and how many recipi
+     ents got the
+     … +16 lines (ctrl+o to expand)
+  ⎿  Updated docs/ARCHITECTURE_DRAFT.md (+2 -1)
+      82    profile (passive / cart abandoner / buyer / stale cart / retu
+          rning). Fixed edge-case users
+      83    are always included (long name, empty name, 29/31 days, bough
+          t after cart, missing
+      84    phone/email, no consent, and two recipients the provider reje
+          cts: a phone number that
+      85 -  isn't a Turkish mobile and an email on a `.invalid` domain). 
+         -Loaded with `COPY` in one transaction.                         
+      85 +  isn't a Turkish mobile and an email on a `.invalid` domain). 
+         +Loaded with `COPY` in one                                      
+      86 +  transaction.                                                 
+      87  - LLM call log: `llm_calls` table, one row per Claude call: cam
+          paign_id, step
+      88    ('audience' | 'messages'), prompt_version, raw_response, vali
+          dation_errors (jsonb),
+      89    repair_attempt, transport_attempt, input_tokens, output_token
+          s, latency_ms, created_at.
+
+⏺ Bash(python3 - <<'EOF'
+      p='DECISIONS.md'…)
+  ⎿   DECISIONS.md               |  83 +++++++++++++-
+      docs/ARCHITECTURE_DRAFT.md | 271 ++++++++++++++++++++++++++++++++++++
+     ---------
+      2 files changed, 299 insertions(+), 55 deletions(-)
+  ⎿  Updated DECISIONS.md (+81 -2)
+      214  ### Mock provider: synchronous, with configurable failures
+      215  
+      216  The mock SMS/email provider answers each request immediately (
+           sent or an error) and has
+      217 -no delivery webhooks. Its failure rates (5xx, 429 with `Retry-
+          -After`, timeouts, latency)                                    
+      218 -are configurable, with non-zero defaults so every run exercise
+          -s retries and rate                                            
+      217 +no delivery webhooks. Its failures (5xx, throttling with `Retr
+          +y-After`, timeouts,                                           
+      218 +latency) are configurable, with non-zero defaults so every run
+          + exercises retries and rate                                   
+      219  limiting; it enforces its own 100/s per channel and deduplicat
+           es by `message_id`. A
+      220  delivered/failed webhook would be more realistic but adds an e
+           ndpoint and states without
+      221  changing what the case asks us to show: retries, rate limiting
+            and no duplicates.
+      222 +`GET /deliveries` lists what was actually delivered and how of
+          +ten each id was requested,                                    
+      223 +which is the evidence that retries didn't become duplicate sen
+          +ds.                                                           
+      224 +                                                              
+      225 +### Throttling comes in windows, and every 429 gets the same r
+          +eaction                                                       
+      226 +                                                              
+      227 +The first plan was a 5% chance of 429 on each request. At 100 
+          +msg/s that is about five                                      
+      228 +429s a second; `Retry-After` is at least one second and pauses
+          + the channel, so the                                          
+      229 +channel would hardly ever send. Treating injected 429s differe
+          +ntly from rate-limit 429s                                     
+      230 +would hide the problem instead of fixing it: a real client can
+          +'t tell why it was                                            
+      231 +throttled. So the provider throttles in episodes (on average e
+          +very 30 s, for 2 s, per                                       
+      232 +channel), like real providers under load, and the worker handl
+          +es every 429 the same way:                                    
+      233 +reschedule the message at `Retry-After`, pause the channel, do
+          +n't count the attempt.                                        
+      234 +                                                              
+      235 +### The same rate-limit algorithm on both sides               
+      236 +                                                              
+      237 +Worker and provider both use a 100/s token bucket per channel:
+          + burst 1 on the worker,                                       
+      238 +burst 10 on the provider, counted when the request arrives. Wi
+          +th a fixed one-second                                         
+      239 +window on the provider, a client keeping 100/s would still see
+          + 429s (a full bucket at                                       
+      240 +start, 101 requests landing in one window, latency bunching ar
+          +rivals). A client that keeps                                  
+      241 +the rule now never hits the provider's limit; tests lower the 
+          +provider's limit to                                           
+      242 +exercise that path.                                           
+      243 +                                                              
+      244 +### What counts as an attempt                                 
+      245 +                                                              
+      246 +At most 5 attempts per message. A 429 or a refused connection 
+          +does not count: neither                                       
+      247 +says anything about the message, and a refused connection mean
+          +s it certainly wasn't                                         
+      248 +sent. Without this, a 20-second provider outage would exhaust 
+          +every message's attempts                                      
+      249 +and fail the whole campaign. 5xx, timeouts and `409 in_progres
+          +s` count, because the                                         
+      250 +request may have reached the provider. The attempt is counted 
+          +at claim and refunded,                                        
+      251 +rather than counted when the result is written, so a message t
+          +hat crashes the worker                                        
+     … 49 more lines (ctrl+o to expand)
+
+⏺ Bash(cat >> .env.example <<'EOF'…)
+  ⎿   .env.example               |  21 ++++
+      DECISIONS.md               |  83 +++++++++++++-
+      docs/ARCHITECTURE_DRAFT.md | 271 ++++++++++++++++++++++++++++++++++++
+     … +2 lines (ctrl+o to expand)
+  ⎿  Updated .env.example (+21 -0)
+      15  
+      16  # Set to false to disable server-side fallback when the model d
+          eclines a request.
+      17  LLM_REFUSAL_FALLBACK=
+      18 +                                                               
+      19 +# --- Worker (all optional; defaults shown) ---                
+      20 +# WORKER_RATE_PER_CHANNEL=100                                  
+      21 +# WORKER_CONCURRENCY_PER_CHANNEL=32                            
+      22 +# WORKER_BATCH_SIZE=20                                         
+      23 +# WORKER_LEASE=30s                                             
+      24 +# WORKER_MAX_ATTEMPTS=5                                        
+      25 +# WORKER_BACKOFF_BASE=1s                                       
+      26 +# WORKER_HTTP_TIMEOUT=3s                                       
+      27 +# WORKER_POLL_INTERVAL=200ms                                   
+      28 +                                                               
+      29 +# --- Mock provider (all optional; defaults shown) ---         
+      30 +# PROVIDER_RATE_PER_CHANNEL=100                                
+      31 +# PROVIDER_ERROR_RATE=0.05                                     
+      32 +# PROVIDER_TIMEOUT_RATE=0.01                                   
+      33 +# PROVIDER_THROTTLE_EVERY=30s                                  
+      34 +# PROVIDER_THROTTLE_FOR=2s                                     
+      35 +# PROVIDER_LATENCY_MIN_MS=50                                   
+      36 +# PROVIDER_LATENCY_MAX_MS=300                                  
+      37 +# Fix the provider's random source (e.g. 1) for reproducible ru
+         +ns; empty = random.                                            
+      38 +# PROVIDER_SEED=                                               
+
+⏺ Onayladığın bütün kararları mimari belgesine (docs/ARCHITECTURE_DRAFT.md),
+  DECISIONS.md'ye ve .env.example'a yazdım. Commit atmadım, kod ve migration'a
+  da henüz dokunmadım.
+
+  Mimari belgesindeki değişiklikler
+  - Services: Binary'nin üç uzun süre çalışan giriş noktası oldu (api, worker,
+    mock-provider). Worker, mock-provider sağlıklı olmadan başlamıyor.
+  - Configuration (yeni bölüm): 13. maddedeki env tablosu ve hangi portların
+    host'a açıldığı.
+  - Data: Claim index'leri artık kanalı da içeriyor: (channel, next_attempt_at)
+    ve (channel, locked_until). Seed'e provider'ın reddedeceği iki kullanıcı
+    eklendi: geçersiz bir numara ve .invalid domain'li bir e-posta.
+  - API tablosu: GET /api/campaigns/{id}/events ve GET /metrics eklendi.
+  - Sending:
+    - Her kanalın kendi claim döngüsü var ve gerekçesi yazılı.
+    - Sonuç yazımında attempts değeri, geç gelen sonucun yenisini ezmesini
+      engelleyen kontrol (fencing) olarak kullanılıyor.
+    - Her provider yanıtı için mesaj durumu, deneme sayılıp sayılmadığı ve
+      kanalın durup durmadığı bir tabloda.
+    - Equal jitter kullanılıyor; 429 ve bağlantı reddi deneme hakkından
+      düşmüyor.
+    - İki tarafta da token bucket var; neden sabit pencere kullanılmadığı
+      açıklandı.
+  - Monitoring:
+    - Her servisin kendi health endpoint'i var.
+    - Worker'ın /healthz endpoint'i DB'ye ve kanal döngülerinin son 10 saniyede
+      çalışıp çalışmadığına bakıyor.
+    - /metrics yanıtında artık worker'ın durumu da var.
+    - SSE'nin kullandığı index migration'dakiyle aynı yazıldı.
+  - Testing:
+    - End-to-end testte /deliveries üzerinden her message_id'nin en fazla bir
+      kez gönderildiği doğrulanıyor.
+    - Geçersiz alıcıların ilk denemede failed olduğu kontrol ediliyor.
+    - Ayrı bir test provider'ın hız sınırını worker'ınkinden düşük tutup limit
+      429'larını tetikliyor.
+  - Mock provider: Endpoint'ler, istek ve yanıt gövdesi tablosu, kontrol sırası,
+    idempotency (in_progress/sent, hatalar saklanmıyor), throttle dönemleri ve
+    yarısı teslimattan önce, yarısı sonra takılan timeout'lar.
+
+  DECISIONS.md: Mock provider maddesini güncelledim ve buradaki kararlar için 8
+  yeni madde ekledim.
+
+  .env.example: Worker ve provider ayarlarını varsayılan değerleriyle, yorum
+  satırı olarak ekledim. Adres ve URL'leri (DATABASE_URL, PROVIDER_URL, *_ADDR)
+  oraya koymadım, çünkü bunlar compose dosyasında tanımlanacak.
+
+  Konuşmadığımız, benim eklediğim bir detay: Bir kanal durduğunda (429 ya da
+  provider'a ulaşılamaması), o kanal için claim edilmiş ama henüz gönderilmemiş
+  satırlar beklemiyor. Kanalın durması bitene kadar retry_scheduled'a geri
+  bırakılıyor ve deneme hakları iade ediliyor. Sebebi şu: bağlantı reddinde
+  kanal 30 saniyeye kadar durabiliyor, bu da 30 saniyelik lease'i aşabiliyor.
+  Alternatifi lease'i uzatmak. Bunu böyle bırakalım mı?
+
+  Bunu onaylarsan koda geçerim. Sıra şöyle olacak: migration 00004 (yeni
+  index'ler), seed'e iki kullanıcı, mock-provider, worker, en son compose.
+
+✻ Cooked for 2m 46s · done 3:38 PM
+
+❯ böyle bırakalım. onaylıyorum devam et                                         
+
+  Ran 6 shell commands (ctrl+o to expand)
+
+⏺ Testler için geçici bir Postgres başlattım; şimdi mevcut approve ve API kodunu
+  okuyup worker'ı bunlara uyumlu yazacağım.
+
+  Searched for 2 patterns, ran 2 shell commands (ctrl+o to expand)
+
+⏺ Şimdi kodu yazıyorum: önce ortak backoff yardımcısı, migration ve seed.
+
+⏺ Bash(mkdir -p internal/backoff && cat > internal/backoff/backoff.go <<'EOF'
+      // Package backoff holds the retry wait shared by Claude calls and message
+      sends.…)
+  ⎿          _, err := h.c.Audience(t.Context(), campaignID, "Paris",
+     validator)
+             var ex *ExhaustedError
+             if !errors.As(err, &ex) || ex.Step != llm.StepAudience ||
+     ex.Errors[0]
+     … +23 lines (ctrl+o to expand)
+  ⎿  Created internal/backoff/backoff.go (+36 -0)
+       1 +// Package backoff holds the retry wait shared by Claude calls 
+         +and message sends.                                             
+       2 +package backoff                                                
+       3 +                                                               
+       4 +import (                                                       
+       5 +        "math/rand/v2"                                         
+       6 +        "time"                                                 
+       7 +)                                                              
+       8 +                                                               
+       9 +// EqualJitter returns a wait between d/2 and d: at least half 
+         +the computed backoff, so a                                     
+      10 +// retry never fires almost immediately, with the other half ra
+         +ndom so a herd of retries                                      
+      11 +// spreads out.                                                
+      12 +func EqualJitter(d time.Duration) time.Duration {              
+      13 +        if d <= 0 {                                            
+      14 +                return 0                                       
+      15 +        }                                                      
+      16 +        return d/2 + rand.N(d/2+1)                             
+      17 +}                                                              
+      18 +                                                               
+      19 +// Exponential is base doubled per attempt (1-based): base, 2×b
+         +ase, 4×base, ... capped at max                                 
+      20 +// when max > 0.                                               
+      21 +func Exponential(base time.Duration, attempt int, max time.Dura
+         +tion) time.Duration {                                          
+      22 +        if attempt < 1 {                                       
+      23 +                attempt = 1                                    
+      24 +        }                                                      
+      25 +        d := base                                              
+      26 +        for i := 1; i < attempt; i++ {                         
+      27 +                d *= 2                                         
+      28 +                if max > 0 && d >= max {                       
+      29 +                        return max                             
+      30 +                }                                              
+      31 +        }                                                      
+      32 +        if max > 0 && d > max {                                
+      33 +                return max                                     
+      34 +        }                                                      
+      35 +        return d                                               
+      36 +}                                                              
+  ⎿  Created internal/backoff/backoff_test.go (+36 -0)
+       1 +package backoff                                                
+       2 +                                                               
+       3 +import (                                                       
+       4 +        "testing"                                              
+       5 +        "time"                                                 
+       6 +)                                                              
+       7 +                                                               
+       8 +func TestEqualJitterRange(t *testing.T) {                      
+       9 +        for range 1000 {                                       
+      10 +                if d := EqualJitter(4 * time.Second); d < 2*tim
+         +e.Second || d > 4*time.Second {                                
+      11 +                        t.Fatalf("jitter %v outside [2s, 4s]", 
+         +d)                                                             
+      12 +                }                                              
+      13 +        }                                                      
+      14 +        if EqualJitter(0) != 0 {                               
+      15 +                t.Fatal("zero backoff must stay zero")         
+      16 +        }                                                      
+      17 +}                                                              
+      18 +                                                               
+      19 +func TestExponential(t *testing.T) {                           
+      20 +        cases := []struct {                                    
+      21 +                attempt int                                    
+      22 +                max     time.Duration                          
+      23 +                want    time.Duration                          
+      24 +        }{                                                     
+      25 +                {1, 0, time.Second},                           
+      26 +                {2, 0, 2 * time.Second},                       
+      27 +                {5, 0, 16 * time.Second},                      
+      28 +                {6, 30 * time.Second, 30 * time.Second},       
+      29 +                {0, 0, time.Second},                           
+      30 +        }                                                      
+      31 +        for _, c := range cases {                              
+      32 +                if got := Exponential(time.Second, c.attempt, c
+         +.max); got != c.want {                                         
+      33 +                        t.Errorf("Exponential(1s, %d, %v) = %v,
+         + want %v", c.attempt, c.max, got, c.want)                      
+      34 +                }                                              
+      35 +        }                                                      
+      36 +}                                                              
+
+⏺ Bash(python3 - <<'EOF'
+      import re…)
+  ⎿  14:import (
+     15:     "context"
+     16:     "errors"
+     … +8 lines (ctrl+o to expand)
+  ⎿  Updated internal/compose/compose.go (+2 -9)
+      16          "errors"
+      17          "fmt"
+      18          "log/slog"
+      19 -        "math/rand/v2"                                         
+      19          "time"
+      20  
+      21 +        "github.com/denizsahiner/smart-campaign-composer/intern
+         +al/backoff"                                                    
+      22          "github.com/denizsahiner/smart-campaign-composer/intern
+          al/llm"
+      23          "github.com/denizsahiner/smart-campaign-composer/intern
+          al/prompt"
+      24          "github.com/denizsahiner/smart-campaign-composer/intern
+          al/validation"
+     ...
+      89  func New(client llm.Client, recorder Recorder, policy Policy) *
+          Composer {
+      90          return &Composer{
+      91                  llm: client, recorder: recorder, policy: policy
+          ,
+      92 -                sleep: sleepCtx, jitter: equalJitter, now: time
+         -.Now,                                                          
+      92 +                sleep: sleepCtx, jitter: backoff.EqualJitter, n
+         +ow: time.Now,                                                  
+      93          }
+      94  }
+      95  
+     ...
+      185  
+      186  // equalJitter waits between d/2 and d, so concurrent retries 
+           spread out but never come
+      187  // back much sooner than intended.
+      188 -func equalJitter(d time.Duration) time.Duration {             
+      189 -        if d <= 0 {                                           
+      190 -                return 0                                      
+      191 -        }                                                     
+      192 -        return d/2 + rand.N(d/2+1)                            
+      193 -}                                                             
+      194 -                                                              
+      188  func sleepCtx(ctx context.Context, d time.Duration) error {
+      189          t := time.NewTimer(d)
+      190          defer t.Stop()
+  ⎿  Updated internal/compose/compose_test.go (+0 -5)
+      360  }
+      361  
+      362  func TestBackoffJitter(t *testing.T) {
+      363 -        for range 1000 {                                      
+      364 -                if d := equalJitter(4 * time.Second); d < 2*ti
+          -me.Second || d > 4*time.Second {                              
+      365 -                        t.Fatalf("jitter %v outside [2s, 4s]",
+          - d)                                                           
+      366 -                }                                             
+      367 -        }                                                     
+      363          c := New(llm.NewMock(), nil, DefaultPolicy())
+      364          c.jitter = func(d time.Duration) time.Duration { retur
+           n d }
+      365          if got := []time.Duration{c.backoff(1), c.backoff(2), 
+           c.backoff(3)}; !slices.Equal(got, []time.Duration{time.Second,
+            2 * time.Second, 4 * time.Second}) {
+
+⏺ Migration ve seed:
+
+⏺ Bash(cat > internal/db/migrations/00004_claim_by_channel.sql <<'EOF'
+      -- +goose Up…)  ⎿  done
+  ⎿  Created internal/db/migrations/00004_claim_by_channel.sql (+12 -0)
+       1 +-- +goose Up                                                   
+       2 +-- The worker claims per channel (one loop each), so the claim 
+         +indexes lead with channel.                                     
+       3 +DROP INDEX messages_claimable_idx;                             
+       4 +DROP INDEX messages_lease_idx;                                 
+       5 +CREATE INDEX messages_claimable_idx ON messages (channel, next_
+         +attempt_at) WHERE status IN ('pending', 'retry_scheduled');    
+       6 +CREATE INDEX messages_lease_idx     ON messages (channel, locke
+         +d_until)    WHERE status = 'sending';                          
+       7 +                                                               
+       8 +-- +goose Down                                                 
+       9 +DROP INDEX messages_claimable_idx;                             
+      10 +DROP INDEX messages_lease_idx;                                 
+      11 +CREATE INDEX messages_claimable_idx ON messages (next_attempt_a
+         +t) WHERE status IN ('pending', 'retry_scheduled');             
+      12 +CREATE INDEX messages_lease_idx     ON messages (locked_until) 
+         +   WHERE status = 'sending';                                   
+  ⎿  Updated internal/seed/generate.go (+13 -0)
+      196          u.SMSConsent, u.EmailConsent = false, false
+      197          g.add(u)
+      198          g.event(u.ID, EventCartAdd, g.ago(7))
+      199 +                                                              
+      200 +        // Recipients the mock provider rejects with a permane
+          +nt 400, so the "failed without                                
+      201 +        // retry" path shows up in every demo. A landline is n
+          +ot a Turkish mobile number.                                   
+      202 +        u = g.newUser("Emre", "Çetin", city)                  
+      203 +        u.Phone = ptr("+902125550123")                        
+      204 +        g.add(u)                                              
+      205 +        g.event(u.ID, EventCartAdd, g.ago(6))                 
+      206 +                                                              
+      207 +        // .invalid is reserved (RFC 2606) and can never be a 
+          +real domain.                                                  
+      208 +        u = g.newUser("Gizem", "Arslan", city)                
+      209 +        u.Email = ptr("gizem.arslan@bounce.invalid")          
+      210 +        g.add(u)                                              
+      211 +        g.event(u.ID, EventCartAdd, g.ago(6))                 
+      212  }
+      213  
+      214  // email builds a unique, ASCII address on example.com (RFC 26
+           06: never a real mailbox).
+  ⎿  Updated internal/seed/generate_test.go (+3 -1)
+      69  func TestEdgeCases(t *testing.T) {
+      70          users, events := Generate(Options{Users: 50, Seed: 42, 
+          Now: testNow})
+      71          byName := map[string]User{}
+      72 -        for _, u := range users[:9] {                          
+      72 +        for _, u := range users[:11] {                         
+      73                  byName[u.FirstName+" "+u.LastName] = u
+      74          }
+      75          matched := abandonedCarts(users, events, "İstanbul", 30
+          )
+     ...
+      88                  {"Ceren Polat", true, func(u User) bool { retur
+          n u.SMSConsent && u.Phone == nil }},
+      89                  {"Berk Koç", true, func(u User) bool { return u
+          .EmailConsent && u.Email == nil }},
+      90                  {"Nazlı Şen", true, func(u User) bool { return 
+          !u.SMSConsent && !u.EmailConsent }},
+      91 +                {"Emre Çetin", true, func(u User) bool { return
+         + u.SMSConsent && *u.Phone == "+902125550123" }},               
+      92 +                {"Gizem Arslan", true, func(u User) bool { retu
+         +rn u.EmailConsent && *u.Email == "gizem.arslan@bounce.invalid" 
+         +}},                                                            
+      93          }
+      94          for _, c := range cases {
+      95                  u, ok := byName[c.name]
+
+⏺ Şimdi mock provider:
+
+⏺ Write(internal/provider/provider.go)
+  ⎿  Wrote 435 lines to internal/provider/provider.go
+       1 // Package provider is the mock SMS/email provider: a synchronou
+         s HTTP service that
+       2 // accepts sends, deduplicates them by message_id and injects th
+         e failures a real
+       3 // provider produces (5xx, throttling with Retry-After, timeouts
+         , latency), so the
+       4 // worker's retry and rate-limit logic runs on every send.
+       5 //
+       6 // Nothing is delivered anywhere; a "delivery" is a record kept 
+         in memory and listed by
+     … +429 lines (ctrl+o to expand)
+
+⏺ Bash(python3 - <<'EOF'
+      p='internal/provider/provider.go'…)
+  ⎿  ok
+  ⎿  Updated internal/provider/provider.go (+11 -11)
+      15          "math/rand/v2"
+      16          "net/http"
+      17          "regexp"
+      18 -        "slices"                                               
+      18          "strconv"
+      19          "strings"
+      20          "sync"
+     ...
+       95          Requests          int       `json:"requests"`
+       96  }
+       97  
+       99 -// ChannelTotals counts what the provider saw on one channel. 
+          -Rejected is keyed by reason:                                  
+      100 -// invalid_recipient, invalid_request, in_progress, rate_limit
+          -ed (over the rate),                                           
+      101 -// throttled (inside a throttle window), server_error, timeout
+          -.                                                             
+       98 +// ChannelTotals counts what the provider saw on one channel. 
+          +Rejected counts requests                                      
+       99 +// that delivered nothing, keyed by reason: invalid_recipient,
+          + invalid_request,                                             
+      100 +// in_progress, rate_limited (over the rate), throttled (insid
+          +e a throttle window),                                         
+      101 +// server_error, timeout. HungAfterDelivery counts deliveries 
+          +whose answer was never sent:                                  
+      102 +// their retries must come back as duplicates.                
+      103  type ChannelTotals struct {
+      103 -        Requests   int            `json:"requests"`           
+      104 -        Deliveries int            `json:"deliveries"`         
+      105 -        Duplicates int            `json:"duplicates"`         
+      106 -        Rejected   map[string]int `json:"rejected"`           
+      104 +        Requests          int            `json:"requests"`    
+      105 +        Deliveries        int            `json:"deliveries"`  
+      106 +        Duplicates        int            `json:"duplicates"`  
+      107 +        HungAfterDelivery int            `json:"hung_after_del
+          +ivery"`                                                       
+      108 +        Rejected          map[string]int `json:"rejected"`    
+      109  }
+      110  
+      111  type DeliveriesResponse struct {
+     ...
+      298          d := s.deliver(channel, req)
+      299          if f == faultHangAfter {
+      300                  s.mu.Lock()
+      299 -                tot.Rejected["timeout"]++                     
+      301 +                tot.HungAfterDelivery++                       
+      302                  s.mu.Unlock()
+      303                  hang(r.Context())
+      304                  return
+     ...
+      433          w.WriteHeader(status)
+     … 4 more lines (ctrl+o to expand)
+
+⏺ Şimdi worker. Önce gönderim ve sonuç sınıflandırması:
+
+⏺ Write(internal/worker/sender.go)
+  ⎿  Wrote 144 lines to internal/worker/sender.go
+       1 package worker
+       2 
+       3 import (
+       4   "bytes"
+       5   "context"
+       6   "encoding/json"
+       7   "errors"
+       8   "fmt"
+       9   "io"
+      10   "net"
+     … +134 lines (ctrl+o to expand)
+
+⏺ Write(internal/worker/queue.go)
+  ⎿  Wrote 124 lines to internal/worker/queue.go
+      1 package worker
+      2 
+      3 import (
+      4   "context"
+      5   "time"
+      6 
+      7   "github.com/jackc/pgx/v5"
+      8   "github.com/jackc/pgx/v5/pgxpool"
+      9 )
+     … +115 lines (ctrl+o to expand)
+
+⏺ Bash(python3 - <<'EOF'
+      p='internal/worker/queue.go'…)
+  ⎿  43:     claimDue = fmt.Sprintf(claimSQL,
+     45:     claimExpired = fmt.Sprintf(claimSQL,
+  ⎿  Updated internal/worker/queue.go (+3 -2)
+      2  
+      3  import (
+      4          "context"
+      5 +        "fmt"                                                   
+      6          "time"
+      7  
+      8          "github.com/jackc/pgx/v5"
+     ...
+      40  
+      41  var (
+      42          // Kept as two queries instead of one OR, so each uses 
+          its own partial index.
+      42 -        claimDue = sprintf(claimSQL,                           
+      43 +        claimDue = fmt.Sprintf(claimSQL,                       
+      44                  `status IN ('pending', 'retry_scheduled') AND n
+          ext_attempt_at <= now()`, `next_attempt_at`)
+      44 -        claimExpired = sprintf(claimSQL,                       
+      45 +        claimExpired = fmt.Sprintf(claimSQL,                   
+      46                  `status = 'sending' AND locked_until < now()`, 
+          `locked_until`)
+      47  )
+      48  
+
+⏺ Write(internal/worker/worker.go)
+  ⎿  Wrote 342 lines to internal/worker/worker.go
+       1 // Package worker sends queued messages to the provider: one loo
+         p per channel, each with
+       2 // its own claim query, goroutine pool and rate limiter, so a pa
+         use or a backlog on one
+       3 // channel never slows the other.
+       4 package worker
+       5 
+       6 import (
+       7   "context"
+       8   "errors"
+     … +334 lines (ctrl+o to expand)
+
+⏺ Bash(python3 - <<'EOF'
+      p='internal/worker/worker.go'…)
+  ⎿  28:             fmt.Fprintln(os.Stderr, "usage: app migrate | api |
+     worker | mock-p
+     rovider | healthcheck [url] | llm-try \"<brief>\"")
+     36:     case "migrate":
+     … +6 lines (ctrl+o to expand)
+  ⎿  Updated cmd/app/api.go (+9 -9)
+      18          "github.com/denizsahiner/smart-campaign-composer/intern
+          al/store"
+      19  )
+      20  
+      21 -func listenAddr() string {                                     
+      22 -        if p := os.Getenv("PORT"); p != "" {                   
+      23 -                return ":" + p                                 
+      24 -        }                                                      
+      25 -        return ":8080"                                         
+      26 -}                                                              
+      21 +func listenAddr() string { return envString("API_ADDR", ":8080"
+         +) }                                                            
+      22  
+      23  // runAPI serves the HTTP API until ctx is cancelled (SIGTERM),
+           then drains open requests.
+      24  func runAPI(ctx context.Context) error {
+     ...
+      64          return srv.Shutdown(shutdownCtx)
+      65  }
+      66  
+      72 -// runHealthcheck is the container healthcheck: the runtime ima
+         -ge has no curl.                                                
+      73 -func runHealthcheck() error {                                  
+      67 +// runHealthcheck is the container healthcheck: the runtime ima
+         +ge has no curl. Without an                                     
+      68 +// argument it checks the API; the worker and the mock provider
+         + pass their own URL.                                           
+      69 +func runHealthcheck(args []string) error {                     
+      70 +        url := "http://localhost" + listenAddr() + "/healthz"  
+      71 +        if len(args) > 0 {                                     
+      72 +                url = args[0]                                  
+      73 +        }                                                      
+      74          client := &http.Client{Timeout: 3 * time.Second}
+      75 -        resp, err := client.Get("http://localhost" + listenAddr
+         -() + "/healthz")                                               
+      75 +        resp, err := client.Get(url)                           
+      76          if err != nil {
+      77                  return err
+      78          }
+  ⎿  Created cmd/app/env.go (+81 -0)
+       1 +package main                                                   
+       2 +                                                               
+       3 +import (                                                       
+       4 +        "fmt"                                                  
+       5 +        "os"                                                   
+       6 +        "strconv"                                              
+       7 +        "time"                                                 
+       8 +)                                                              
+       9 +                                                               
+      10 +// envError collects malformed variables, so a typo fails start
+         +up instead of silently                                         
+      11 +// falling back to a default.                                  
+      12 +type envError []string                                         
+      13 +                                                               
+      14 +func (e *envError) add(name, val string, err error) {          
+      15 +        *e = append(*e, fmt.Sprintf("%s=%q: %v", name, val, err
+         +))                                                             
+      16 +}                                                              
+      17 +                                                               
+      18 +func (e envError) err() error {                                
+      19 +        if len(e) == 0 {                                       
+      20 +                return nil                                     
+      21 +        }                                                      
+      22 +        return fmt.Errorf("invalid environment: %v", []string(e
+         +))                                                             
+      23 +}                                                              
+      24 +                                                               
+      25 +func envString(name, def string) string {                      
+      26 +        if v := os.Getenv(name); v != "" {                     
+      27 +                return v                                       
+      28 +        }                                                      
+      29 +        return def                                             
+      30 +}                                                              
+      31 +                                                               
+      32 +func (e *envError) int(name string, def int) int {             
+      33 +        v := os.Getenv(name)                                   
+      34 +        if v == "" {                                           
+      35 +                return def                                     
+      36 +        }                                                      
+      37 +        n, err := strconv.Atoi(v)                              
+      38 +        if err != nil || n < 0 {                               
+      39 +                e.add(name, v, fmt.Errorf("want a non-negative 
+         +integer"))                                                     
+      40 +                return def                                     
+     … 41 more lines (ctrl+o to expand)
+  ⎿  Updated cmd/app/main.go (+6 -2)
+      25  
+      26  func main() {
+      27          if len(os.Args) < 2 {
+      28 -                fmt.Fprintln(os.Stderr, "usage: app migrate | a
+         -pi | healthcheck | llm-try \"<brief>\"")                       
+      28 +                fmt.Fprintln(os.Stderr, "usage: app migrate | a
+         +pi | worker | mock-provider | healthcheck [url] | llm-try \"<br
+         +ief>\"")                                                       
+      29                  os.Exit(2)
+      30          }
+      31          ctx, stop := signal.NotifyContext(context.Background(),
+           os.Interrupt, syscall.SIGTERM)
+     ...
+      37                  err = runMigrate(ctx)
+      38          case "api":
+      39                  err = runAPI(ctx)
+      40 +        case "worker":                                         
+      41 +                err = runWorker(ctx)                           
+      42 +        case "mock-provider":                                  
+      43 +                err = runProvider(ctx)                         
+      44          case "healthcheck":
+      41 -                err = runHealthcheck()                         
+      45 +                err = runHealthcheck(os.Args[2:])              
+      46          case "llm-try":
+      47                  err = runLLMTry(ctx, os.Args[2:])
+      48          default:
+  ⎿  Created cmd/app/provider.go (+57 -0)
+       1 +package main                                                   
+       2 +                                                               
+       3 +import (                                                       
+       4 +        "context"                                              
+       5 +        "log/slog"                                             
+       6 +        "net/http"                                             
+       7 +        "time"                                                 
+       8 +                                                               
+       9 +        "github.com/denizsahiner/smart-campaign-composer/intern
+         +al/provider"                                                   
+      10 +)                                                              
+      11 +                                                               
+      12 +func providerConfigFromEnv() (provider.Config, error) {        
+      13 +        var e envError                                         
+      14 +        d := provider.DefaultConfig()                          
+      15 +        cfg := provider.Config{                                
+      16 +                RatePerChannel: e.float("PROVIDER_RATE_PER_CHAN
+         +NEL", d.RatePerChannel),                                       
+      17 +                ErrorRate:      e.float("PROVIDER_ERROR_RATE", 
+         +d.ErrorRate),                                                  
+      18 +                TimeoutRate:    e.float("PROVIDER_TIMEOUT_RATE"
+         +, d.TimeoutRate),                                              
+      19 +                ThrottleEvery:  e.duration("PROVIDER_THROTTLE_E
+         +VERY", d.ThrottleEvery),                                       
+      20 +                ThrottleFor:    e.duration("PROVIDER_THROTTLE_F
+         +OR", d.ThrottleFor),                                           
+      21 +                LatencyMin:     time.Duration(e.int("PROVIDER_L
+         +ATENCY_MIN_MS", int(d.LatencyMin.Milliseconds()))) * time.Milli
+         +second,                                                        
+      22 +                LatencyMax:     time.Duration(e.int("PROVIDER_L
+         +ATENCY_MAX_MS", int(d.LatencyMax.Milliseconds()))) * time.Milli
+         +second,                                                        
+      23 +                Seed:           e.uint64("PROVIDER_SEED"),     
+      24 +        }                                                      
+      25 +        return cfg, e.err()                                    
+      26 +}                                                              
+      27 +                                                               
+      28 +// runProvider serves the mock SMS/email provider until ctx is 
+         +cancelled.                                                     
+      29 +func runProvider(ctx context.Context) error {                  
+      30 +        cfg, err := providerConfigFromEnv()                    
+      31 +        if err != nil {                                        
+      32 +                return err                                     
+      33 +        }                                                      
+      34 +        srv := &http.Server{                                   
+      35 +                Addr:              envString("PROVIDER_ADDR", "
+         +:8090"),                                                       
+      36 +                Handler:           provider.New(cfg).Handler(),
+      37 +                ReadHeaderTimeout: 5 * time.Second,            
+      38 +        }                                                      
+      39 +        errc := make(chan error, 1)                            
+      40 +        go func() { errc <- srv.ListenAndServe() }()           
+     … 17 more lines (ctrl+o to expand)
+  ⎿  Created cmd/app/worker.go (+84 -0)
+       1 +package main                                                   
+       2 +                                                               
+       3 +import (                                                       
+       4 +        "context"                                              
+       5 +        "errors"                                               
+       6 +        "fmt"                                                  
+       7 +        "log/slog"                                             
+       8 +        "net/http"                                             
+       9 +        "os"                                                   
+      10 +        "time"                                                 
+      11 +                                                               
+      12 +        "github.com/jackc/pgx/v5/pgxpool"                      
+      13 +                                                               
+      14 +        "github.com/denizsahiner/smart-campaign-composer/intern
+         +al/worker"                                                     
+      15 +)                                                              
+      16 +                                                               
+      17 +func workerConfigFromEnv() (worker.Config, error) {            
+      18 +        var e envError                                         
+      19 +        d := worker.DefaultConfig()                            
+      20 +        cfg := worker.Config{                                  
+      21 +                RatePerChannel: e.float("WORKER_RATE_PER_CHANNE
+         +L", d.RatePerChannel),                                         
+      22 +                Concurrency:    e.int("WORKER_CONCURRENCY_PER_C
+         +HANNEL", d.Concurrency),                                       
+      23 +                BatchSize:      e.int("WORKER_BATCH_SIZE", d.Ba
+         +tchSize),                                                      
+      24 +                Lease:          e.duration("WORKER_LEASE", d.Le
+         +ase),                                                          
+      25 +                MaxAttempts:    e.int("WORKER_MAX_ATTEMPTS", d.
+         +MaxAttempts),                                                  
+      26 +                BackoffBase:    e.duration("WORKER_BACKOFF_BASE
+         +", d.BackoffBase),                                             
+      27 +                PollInterval:   e.duration("WORKER_POLL_INTERVA
+         +L", d.PollInterval),                                           
+      28 +        }                                                      
+      29 +        if err := e.err(); err != nil {                        
+      30 +                return cfg, err                                
+      31 +        }                                                      
+      32 +        if cfg.RatePerChannel <= 0 || cfg.Concurrency < 1 || cf
+         +g.BatchSize < 1 || cfg.MaxAttempts < 1 ||                      
+      33 +                cfg.Lease <= 0 || cfg.PollInterval <= 0 {      
+      34 +                return cfg, errors.New("worker settings must be
+         + positive")                                                    
+      35 +        }                                                      
+      36 +        return cfg, nil                                        
+      37 +}                                                              
+      38 +                                                               
+      39 +// runWorker sends queued messages until ctx is cancelled (SIGT
+         +ERM).                                                          
+      40 +func runWorker(ctx context.Context) error {                    
+     … 44 more lines (ctrl+o to expand)
+  ⎿  … 1 more file changed
+
+⏺ Kodu derleyip bağımlılığı ekliyorum (Docker içinde, yerelde Go yok):
+
+⏺ Bash(docker run --rm -v "$PWD":/src -w /src -v scc-gomod:/go/pkg/mod -v
+      scc-gocache:/root/.cache/go-build golang:1.26-alpine sh -c 'go get
+      golang.org/x/time@latest >…)
+  ⎿  9:      golang.org/x/time v0.16.0
+  ⎿  Updated go.mod (+1 -0)
+       6          github.com/anthropics/anthropic-sdk-go/v2 v2.7.0
+       7          github.com/jackc/pgx/v5 v5.12.0
+       8          github.com/pressly/goose/v3 v3.29.0
+       9 +        golang.org/x/time v0.16.0                              
+      10  )
+      11  
+      12  require (
+  ⎿  Updated go.sum (+2 -2)
+      152  golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQP
+           EecfsnNMuSxOs3og=
+      153  golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/
+           UGUTJVXoWc=
+      154  golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoq
+           RvvbKPJ2uz/KU+a+s=
+      155 -golang.org/x/time v0.5.0 h1:o7cqy6amK/52YcAKIPlM3a+Fpj35zvRj2T
+          -P+e1xFSfk=                                                    
+      156 -golang.org/x/time v0.5.0/go.mod h1:3BpzKBy/shNhVucY/MWOyx10tF3
+          -SFh9QdLuxbVysPQM=                                             
+      155 +golang.org/x/time v0.16.0 h1:vMb6ptszcQMkcwiRTAuNNU50gom6++Q/6
+          +gY2hDM6VDE=                                                   
+      156 +golang.org/x/time v0.16.0/go.mod h1:rVKOqvZeKvrDKTQiAHJ7wmwP0R
+          +zleSphoEA9RcdLA0s=                                            
+      157  google.golang.org/api v0.189.0 h1:equMo30LypAkdkLMBqfeIqtyAnly
+           ig1JSZArl4XPwdI=
+      158  google.golang.org/api v0.189.0/go.mod h1:FLWGJKb0hb+pU2j+rJqwb
+           nsF+ym+fQs73rbJ+KAUgy8=
+      159  google.golang.org/genproto/googleapis/rpc v0.0.0-2026100518211
+           5-fad411399dd8 h1:0SXBqli5dnuCKMjI/X3FM226zEaEa0GUcSCJtN1vL2o=
+  ⎿  (timeout 5m)
+
+⏺ Derleme, vet ve gofmt temiz. Şimdi testler: önce provider.
+
+⏺ Write(internal/provider/provider_test.go)
+  ⎿  Wrote 227 lines to internal/provider/provider_test.go
+       1 package provider
+       2 
+       3 import (
+       4   "bytes"
+       5   "context"
+       6   "encoding/json"
+       7   "fmt"
+       8   "net/http"
+       9   "net/http/httptest"
+      10   "sync"
+     … +217 lines (ctrl+o to expand)
+
+⏺ Write(internal/worker/sender_test.go)
+  ⎿  Wrote 67 lines to internal/worker/sender_test.go
+       1 package worker
+       2 
+       3 import (
+       4   "context"
+       5   "net"
+       6   "net/http"
+       7   "net/http/httptest"
+       8   "testing"
+       9   "time"
+      10 )
+     … +57 lines (ctrl+o to expand)
+
+⏺ Şimdi worker'ın Postgres'e karşı entegrasyon testleri:
+
+⏺ Write(internal/worker/worker_integration_test.go)
+  ⎿  Wrote 292 lines to internal/worker/worker_integration_test.go
+       1 package worker
+       2 
+       3 import (
+       4   "context"
+       5   "fmt"
+       6   "net"
+       7   "net/http/httptest"
+       8   "strconv"
+       9   "testing"
+      10   "time"
+     … +282 lines (ctrl+o to expand)
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+⏺ Background command "Run full test suite with integration database" completed
+(exit code 0)
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Testlerden biri takıldı: sunucu tarafı, istek gövdesi sonuna kadar okunmadan
+  istemcinin bağlantıyı kestiğini fark edemiyor. Provider'da gövdeyi tamamen
+  okuyacak şekilde düzeltiyorum:
+
+⏺ Bash(python3 - <<'EOF'
+      p='internal/provider/provider.go'…)
+  ⎿  ok      github.com/denizsahiner/smart-campaign-composer/internal/api
+      12.384
+     s
+     ok
+     github.com/denizsahiner/smart-campaign-composer/internal/backoff
+      0.
+     … +18 lines (ctrl+o to expand)
+  ⎿  Updated internal/provider/provider.go (+8 -2)
+      11          "context"
+      12          "encoding/json"
+      13          "fmt"
+      14 +        "io"                                                   
+      15          "math"
+      16          "math/rand/v2"
+      17          "net/http"
+     ...
+      225  
+      226  func (s *Server) send(w http.ResponseWriter, r *http.Request, 
+           channel string) {
+      227          var req SendRequest
+      227 -        dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 
+          -64<<10))                                                      
+      228 +        body := http.MaxBytesReader(w, r.Body, 64<<10)        
+      229 +        dec := json.NewDecoder(body)                          
+      230          dec.DisallowUnknownFields()
+      229 -        if err := dec.Decode(&req); err != nil {              
+      231 +        err := dec.Decode(&req)                               
+      232 +        // Read the body to EOF: only then does net/http watch
+          + the connection and cancel                                    
+      233 +        // r.Context() when the client disconnects, which is w
+          +hat ends an injected hang.                                    
+      234 +        io.Copy(io.Discard, body)                             
+      235 +        if err != nil {                                       
+      236                  s.mu.Lock()
+      237                  s.totals[channel].Requests++
+      238                  s.totals[channel].Rejected[ErrInvalidRequest]+
+           +
+  ⎿  Updated internal/worker/sender_test.go (+2 -0)
+      2  
+      3  import (
+      4          "context"
+      5 +        "io"                                                    
+      6          "net"
+      7          "net/http"
+      8          "net/http/httptest"
+     ...
+      58  
+      59  func TestSendTimeoutCounts(t *testing.T) {
+      60          ts := httptest.NewServer(http.HandlerFunc(func(w http.R
+          esponseWriter, r *http.Request) {
+      61 +                io.Copy(io.Discard, r.Body) // lets the server 
+         +notice the client hanging up                                   
+      62                  <-r.Context().Done()
+      63          }))
+      64          defer ts.Close()
+  ⎿  (timeout 6m 40s)
+
+⏺ Hepsi geçti. Worker testlerinin gerçekten çalıştığını (skip edilmediğini) ve
+  önemli kuralları bozunca yakaladıklarını kontrol ediyorum:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ Üç bozma denemesinin üçünü de testler yakaladı, dosyalar geri yüklendi. Şimdi
+  compose:
+
+⏺ Bash(S=/private/tmp/claude-501/-Users-denizsahiner-Desktop-smart-campaign-comp
+      oser/d20b2a9c-d4e1-4af2-9a2e-a038f5a34d48/scratchpad; diff -q $S/w.bak
+      internal/worker/…)
+  ⎿  compose-ok
+  ⎿  Updated docker-compose.yml (+43 -0)
+      48        retries: 10
+      49      restart: unless-stopped
+      50  
+      51 +  # Mock SMS/email provider. Failure rates and limits come from
+         + .env (PROVIDER_*);                                            
+      52 +  # the defaults inject 5xx, throttling, timeouts and latency o
+         +n every run.                                                   
+      53 +  mock-provider:                                               
+      54 +    build: .                                                   
+      55 +    command: ["mock-provider"]                                 
+      56 +    env_file:                                                  
+      57 +      - path: .env                                             
+      58 +        required: false                                        
+      59 +    environment:                                               
+      60 +      PROVIDER_ADDR: ":8090"                                   
+      61 +    ports:                                                     
+      62 +      - "8090:8090"                                            
+      63 +    healthcheck:                                               
+      64 +      test: ["CMD", "/app", "healthcheck", "http://localhost:80
+         +90/healthz"]                                                   
+      65 +      interval: 5s                                             
+      66 +      timeout: 4s                                              
+      67 +      retries: 10                                              
+      68 +    restart: unless-stopped                                    
+      69 +                                                               
+      70 +  worker:                                                      
+      71 +    build: .                                                   
+      72 +    command: ["worker"]                                        
+      73 +    env_file:                                                  
+      74 +      - path: .env                                             
+      75 +        required: false                                        
+      76 +    environment:                                               
+      77 +      DATABASE_URL: postgres://composer:composer@postgres:5432/
+         +composer?sslmode=disable                                       
+      78 +      PROVIDER_URL: http://mock-provider:8090                  
+      79 +      WORKER_HEALTH_ADDR: ":8081"                              
+      80 +    depends_on:                                                
+      81 +      migrate:                                                 
+      82 +        condition: service_completed_successfully              
+      83 +      mock-provider:                                           
+      84 +        condition: service_healthy                             
+      85 +    healthcheck:                                               
+      86 +      test: ["CMD", "/app", "healthcheck", "http://localhost:80
+         +81/healthz"]                                                   
+      87 +      interval: 5s                                             
+     … 8 more lines (ctrl+o to expand)
+
+⏺ Stack'i gerçekten ayağa kaldırıp örnek brief ile uçtan uca gönderim deniyorum:
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  Blocked by auto mode
+     │ Auto mode: No reason provided
+
+⏺ Denied adım muhtemelen down -v idi (veritabanı volume'unu siliyordu). Onu
+  atlayıp yalnızca stack'i başlatıyorum:
+
+  Ran 5 shell commands (ctrl+o to expand)
+
+⏺ Gönderim yaklaşık 11 saniyede bitti; kanal başına ~100 msg/s'ye yakın.
+  Provider'ın gördüklerini ve kampanya durumunu kontrol ediyorum:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Her şey tutarlı: 698 teslim ve sıfır duplicate var, kampanya completed
+  durumunda, worker sağlıklı. Şimdi belgedeki graceful shutdown satırını gerçek
+  davranışa göre güncelliyorum.
+
+⏺ Bash(python3 - <<'EOF'
+      p='docs/ARCHITECTURE_DRAFT.md'…)
+  ⎿   M .env.example
+      M DECISIONS.md
+      M cmd/app/api.go
+     … +18 lines (ctrl+o to expand)
+  ⎿  Updated docs/ARCHITECTURE_DRAFT.md (+4 -2)
+      22    waits for `mock-provider: service_healthy`.
+      23  - `frontend`: the Vue app is built and served by nginx, which p
+          roxies `/api` to the API
+      24    (no CORS setup needed).
+      25 -- Graceful shutdown: on SIGTERM the worker stops claiming, fini
+         -shes its in-flight batch                                       
+      26 -  and exits; anything left in `sending` is recovered by lease e
+         -xpiry. The API drains                                          
+      25 +- Graceful shutdown: on SIGTERM the worker stops claiming, lets
+         + sends already on the wire                                     
+      26 +  finish (bounded by the HTTP timeout) and writes their results
+         +, hands claimed rows still                                     
+      27 +  waiting for the rate limiter back with their attempt refunded
+         +, and exits. A row whose                                       
+      28 +  result couldn't be written stays `sending` and is recovered b
+         +y lease expiry. The API drains                                 
+      29    open requests and closes SSE streams.
+      30  
+      31  ## Configuration
+
+⏺ Mock provider ve worker hazır. Testlerin hepsi geçiyor ve gerçek stack'te
+  örnek brief'i uçtan uca gönderdim. Commit atmadım.
+
+  Eklenenler
+  - Migration 00004: claim index'leri artık kanalı da içeriyor.
+  - Seed: provider'ın reddettiği iki kullanıcı eklendi: sabit hat numarası olan
+    Emre Çetin ve @bounce.invalid adresli Gizem Arslan.
+  - internal/backoff: equal jitter ve üstel bekleme. LLM tarafı da artık bunu
+    kullanıyor.
+  - internal/provider: POST /sms, POST /email, GET /deliveries, GET /healthz.
+    Hız sınırı token bucket ile, throttle dönemleri var, idempotency
+    in_progress/sent olarak tutuluyor ve hatalar saklanmıyor. Timeout'ların
+    yarısı teslimattan önce, yarısı teslimattan sonra takılıyor.
+  - internal/worker: her kanalın kendi claim döngüsü, goroutine havuzu ve
+    limiter'ı var. Sonuç yazımı fenced; 429 ve provider'a hiç ulaşılamaması
+    deneme hakkından düşmüyor; kanal durunca claim edilmiş satırlar geri
+    bırakılıyor. Worker'ın /healthz endpoint'i ve campaign completed geçişi de
+    burada.
+  - cmd/app: worker ve mock-provider komutları eklendi. healthcheck artık bir
+    URL alabiliyor. Env değişkenleri bozuk yazılırsa uygulama başlamıyor. API
+    portu artık PORT yerine API_ADDR ile ayarlanıyor.
+  - docker-compose.yml: mock-provider ve worker servisleri healthcheck'leriyle
+    eklendi. Worker, provider sağlıklı olmadan başlamıyor.
+
+  Doğrulama
+  - go test ./... Postgres'e karşı çalıştı; worker'ın entegrasyon testleri skip
+    edilmedi.
+  - Testlerin gerçekten bir şey yakaladığını görmek için üç kuralı bilerek
+    bozdum: 429'un deneme sayması, fence'in kaldırılması ve provider'ın hataları
+    saklaması. Üçünde de ilgili test kırıldı, sonra kodu geri aldım.
+  - Canlı stack'te 698 mesaj yaklaşık 11 saniyede gitti, yani kanal başına ~100
+    msg/s. Provider'da 698 teslim, 698 farklı id ve sıfır çift gönderim var.
+    Kampanya completed oldu, worker sağlıklı. Gönderim sırasında 33 adet 5xx, 2
+    throttle ve 2 timeout yaşandı; hepsi retry ile toparlandı.
+
+  Henüz yapılmayanlar ve dikkat etmen gerekenler
+  - GET /metrics ve GET /api/campaigns/{id}/events (SSE) yok. Mimari belgesinin
+    API tablosunda yer alıyorlar ama kodları yazılmadı. Bunları dashboard
+    adımıyla birlikte yapmayı öneriyorum.
+  - Mevcut veritabanında yeni edge-case kullanıcılar yok. Seed yalnızca users
+    tablosu boşsa yükleniyor. Görmek için docker compose down -v && docker 
+    compose up --build gerekiyor; bu komut volume'u sildiği için çalıştırmadım.
+    Canlı denemede bu yüzden kalıcı failed mesaj görünmedi; bu yol testlerde
+    doğrulanıyor.
+  - Canlı denemede "teslim edildi ama yanıt gelmedi" senaryosu denk gelmedi.
+    Timeout'ların yarısı bu türde ve oranı %1 olduğu için rastgele bir çalışmada
+    çıkmayabiliyor. Testte ise her seferinde oluşuyor ve tekrar denemenin
+    duplicate döndüğü doğrulanıyor.
+  - Test Postgres'i hâlâ çalışıyor: scc-testpg container'ı scc-test ağında açık.
+    Testlere devam edeceksek kalsın, istersen kapatırım.
+
+  Bir sonraki adım commit mi olsun, yoksa önce /metrics ve SSE'ye mi geçelim?
+
+✻ Brewed for 20m 40s · done 4:00 PM
+
+※ recap: Mock SMS/email provider ve worker'ı yazdım; testler geçiyor ve canlı stack'te 698 mesaj çift gönderim olmadan gitti. Senden beklediğim karar: önce commit mi atalım, yoksa `/metrics` ve canlı durum SSE'sine mi geçelim? (disable recaps in /config)
+
+❯ önce commit edelim sonra metrics ve sse'ye geçelim                            
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Geçmişte feat/api gibi branch'lerle çalışılıp main'e doğrusal birleştirilmiş;
+  ben de aynı düzende feat/worker branch'ini açıp iki commit (kod + belgeler)
+  atacağım, co-author satırı olmadan.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ İki commit feat/worker branch'inde:
+
+  - 987a291 feat(worker): send queued messages through a mock SMS/email provider
+  - 6e3d347 docs: specify the worker, the mock provider and their failure 
+    handling
+
+  Co-author satırı eklemedim. ai-sessions/ ve web/ dosyalarına dokunmadım,
+  commit dışında kaldılar. Main'e merge etmedim; nasıl birleştirmek istediğine
+  sen karar ver.
+
+  Metrics ve SSE'nin genel tasarımı belgede zaten var. Ama koda geçmeden önce
+  senin karar vermen gereken birkaç nokta çıktı. Her birine önerimi yazdım:
+
+  1. /metrics'in yolu. Frontend'i nginx sunacak ve nginx yalnızca /api altındaki
+  istekleri API'ye yönlendiriyor. Bu yüzden belgedeki GET /metrics yolu
+  dashboard'dan erişilemez.
+  - Öneri: GET /api/metrics. /healthz köke kalsın, onu docker kullanıyor.
+
+  2. Metrics'in kapsamı. Belgedeki şekil sistemin geneli için (queue_depth,
+  kanal × durum sayıları, LLM çağrı sayısı ve validation hataları, worker
+  durumu).
+  - Öneri: Belgedeki şekli koruyalım ve iki alan ekleyelim:
+    - LLM için ortalama gecikme ve toplam token. Bunlar llm_calls tablosunda
+      zaten var.
+    - Provider'ın /deliveries toplamları (throttle, 5xx, duplicate sayıları).
+      Böylece dashboard retry'ların neden olduğunu da gösterebilir.
+  - Kampanyaya özel sayılar SSE'de olacağı için metrics'e girmesin.
+  - queue_depth: pending + retry_scheduled + sending.
+
+  3. Worker ve provider'ın adresleri. API'nin bu iki servise ulaşması gerekiyor.
+  - Öneri: WORKER_HEALTH_URL ve PROVIDER_URL env değişkenlerini compose'da
+    tanımlayalım. Biri yanıt vermezse (1 sn timeout) metrics yine dönsün, ilgili
+    alan "unreachable" olsun.
+
+  4. SSE olaylarının formatı (GET /api/campaigns/{id}/events). Öneri:
+  - event: progress: bağlantı açılır açılmaz bir kez gönderilir, sonra sayılar
+    her değiştiğinde tekrar. Veri: kanal × durum sayıları, kampanya durumu ve
+    gönderim hızı. Hız, son 5 saniyede sent_at'e göre hesaplanır.
+  - event: done: açık mesaj kalmayınca bir kez gönderilir, ardından stream
+    kapanır.
+  - 15 saniyede bir : ping yorumu: hiçbir şey değişmese bile proxy'nin
+    bağlantıyı kapatmaması için.
+  - Kampanya henüz approve edilmediyse: 409 not_approved dönsün.
+  - Kampanya zaten completed ise: tek bir progress ve done gönderilip stream
+    kapatılsın. Böylece eski kampanyalar da açılabilir.
+
+  5. Bağlantı başına sorgu (polling). Belgede her açık SSE bağlantısının
+  saniyede bir sorgu attığı yazıyor. Tek pazarlamacılı bir demo için bu sorun
+  değil.
+  - Öneri: Olduğu gibi kalsın, sınırlama olarak belgeye yazayım. Alternatifi
+    aynı kampanyayı izleyen bağlantıların tek sorguyu paylaşması, ama şu an
+    gereksiz karmaşıklık.
+
+  Bunları onaylıyor musun, yoksa değiştirmek istediğin bir nokta var mı?
+
+✻ Churned for 38s · done 4:36 PM
+
+❯ önerilerini kabul ediyorum                                                    
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+⏺ Tasarım net; kodu yazıyorum. Önce provider'a /deliveries?summary=1 (yalnızca
+  toplamlar): metrics her istekte binlerce teslim kaydını taşımasın.
+
+⏺ Bash(python3 - <<'EOF'
+      p='internal/provider/provider.go'…)
+  ⎿  106:    Deliveries        int            `json:"deliveries"`
+     114:    Deliveries []Delivery
+     `json:"deliveries,omitempty"`
+  ⎿  Updated internal/provider/provider.go (+7 -2)
+      111  
+      112  type DeliveriesResponse struct {
+      113          Totals     map[string]*ChannelTotals `json:"totals"`
+      114 -        Deliveries []Delivery                `json:"deliveries
+          -"`                                                            
+      114 +        Deliveries []Delivery                `json:"deliveries
+          +,omitempty"`                                                  
+      115  }
+      116  
+      117  // entry is the idempotency record of one message_id: in progr
+           ess until the delivery is
+     ...
+      391          return *d
+      392  }
+      393  
+      394 +// deliveries serves GET /deliveries; ?summary=1 leaves out th
+          +e list, for frequent polling.                                 
+      395  func (s *Server) deliveries(w http.ResponseWriter, r *http.Req
+           uest) {
+      395 -        writeJSON(w, http.StatusOK, s.Snapshot())             
+      396 +        snap := s.Snapshot()                                  
+      397 +        if r.URL.Query().Get("summary") == "1" {              
+      398 +                snap.Deliveries = nil                         
+      399 +        }                                                     
+      400 +        writeJSON(w, http.StatusOK, snap)                     
+      401  }
+      402  
+      403  // Snapshot returns the totals and every delivery, in delivery
+            order.
+
+⏺ Bash(python3 - <<'EOF'
+      p='internal/provider/provider.go'…)
+  ⎿  ok
+  ⎿  Updated internal/provider/provider.go (+3 -2)
+      111  
+      112  type DeliveriesResponse struct {
+      113          Totals     map[string]*ChannelTotals `json:"totals"`
+      114 -        Deliveries []Delivery                `json:"deliveries
+          -,omitempty"`                                                  
+      114 +        Deliveries []Delivery                `json:"deliveries
+          +"`                                                            
+      115  }
+      116  
+      117  // entry is the idempotency record of one message_id: in progr
+           ess until the delivery is
+     ...
+      395  func (s *Server) deliveries(w http.ResponseWriter, r *http.Req
+           uest) {
+      396          snap := s.Snapshot()
+      397          if r.URL.Query().Get("summary") == "1" {
+      398 -                snap.Deliveries = nil                         
+      398 +                writeJSON(w, http.StatusOK, map[string]any{"to
+          +tals": snap.Totals})                                          
+      399 +                return                                        
+      400          }
+      401          writeJSON(w, http.StatusOK, snap)
+      402  }
+
+⏺ Şimdi API tarafı: metrics ve SSE.
+
+⏺ Write(internal/api/monitoring.go)
+  ⎿  Wrote 309 lines to internal/api/monitoring.go
+       1 package api
+       2 
+       3 import (
+       4   "context"
+       5   "encoding/json"
+       6   "fmt"
+       7   "io"
+       8   "log/slog"
+       9   "net/http"
+      10   "strings"
+     … +299 lines (ctrl+o to expand)
+
+⏺ Bash(python3 - <<'EOF'
+      p='internal/api/monitoring.go'…)
+  ⎿  45:     monitoring := api.DefaultMonitoring()
+     46:     monitoring.WorkerHealthURL = os.Getenv("WORKER_HEALTH_URL")
+     47:     monitoring.ProviderURL = os.Getenv("PROVIDER_URL")
+     … +3 lines (ctrl+o to expand)
+  ⎿  Updated cmd/app/api.go (+5 -1)
+      42                  return err
+      43          }
+      44          composer := compose.New(client, store.New(pool), compos
+          e.DefaultPolicy())
+      45 +        monitoring := api.DefaultMonitoring()                  
+      46 +        monitoring.WorkerHealthURL = os.Getenv("WORKER_HEALTH_U
+         +RL")                                                           
+      47 +        monitoring.ProviderURL = os.Getenv("PROVIDER_URL")     
+      48          srv := &http.Server{
+      49                  Addr:              listenAddr(),
+      47 -                Handler:           api.NewServer(pool, composer
+         -, segment.NewValidator(cities)).Handler(),                     
+      50 +                Handler: api.NewServer(pool, composer, segment.
+         +NewValidator(cities)).                                         
+      51 +                        WithMonitoring(monitoring).Handler(),  
+      52                  ReadHeaderTimeout: 10 * time.Second,
+      53                  // No WriteTimeout: message generation is a lon
+          g-lived SSE response.
+      54          }
+  ⎿  Updated internal/api/messages.go (+17 -0)
+      113          return s
+      114  }
+      115  
+      116 +// event writes a named event with v as its JSON data.        
+      117 +func (s *sseWriter) event(name string, v any) {               
+      118 +        data, err := json.Marshal(v)                          
+      119 +        if err != nil {                                       
+      120 +                name, data = "error", []byte(`{"message":"inte
+          +rnal error"}`)                                                
+      121 +        }                                                     
+      122 +        fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", name, data
+          +)                                                             
+      123 +        s.rc.Flush()                                          
+      124 +}                                                             
+      125 +                                                              
+      126 +// comment writes an SSE comment line: ignored by clients, kee
+          +ps idle proxies from                                          
+      127 +// closing the stream.                                        
+      128 +func (s *sseWriter) comment(text string) {                    
+      129 +        fmt.Fprintf(s.w, ": %s\n\n", text)                    
+      130 +        s.rc.Flush()                                          
+      131 +}                                                             
+      132 +                                                              
+      133  // send writes one event; the event name is the type, the data
+            its JSON.
+      134  func (s *sseWriter) send(e compose.Event) {
+      135          data, err := json.Marshal(e)
+  ⎿  Updated internal/api/monitoring.go (+8 -20)
+      39  // rateWindow is how far back the send rate in a progress event
+           looks.
+      40  const rateWindow = 5 * time.Second
+      41  
+      42 -var (                                                          
+      43 -        channels = []string{"sms", "email"}                    
+      44 -        statuses = []string{"pending", "sending", "retry_schedu
+         -led", "sent", "failed", "skipped"}                             
+      45 -)                                                              
+      42 +var statuses = []string{"pending", "sending", "retry_scheduled"
+         +, "sent", "failed", "skipped"}                                 
+      43  
+      44  // openStatuses are the ones still waiting for the worker.
+      45  var openStatuses = map[string]bool{"pending": true, "sending": 
+          true, "retry_scheduled": true}
+     ...
+      202  
+      203  // progress is the data of a progress (and the final done) eve
+           nt.
+      204  type progress struct {
+      208 -        CampaignID int64                      `json:"campaign_
+          -id"`                                                          
+      209 -        Status     string                     `json:"status"` 
+      210 -        Channels   map[string]statusCounts    `json:"channels"
+          -`                                                             
+      211 -        Total      map[string]int             `json:"total"`  
+      212 -        Rate       map[string]float64         `json:"rate_per_
+          -second"` // sends/s over the last 5 s                         
+      213 -        counts     map[string]map[string]int  // fingerprint w
+          -ithout the rate                                               
+      214 -        _          struct{}                   `json:"-"`      
+      215 -        recent     map[string]int                             
+      216 -        ignore     map[string]map[string]bool `json:"-"`      
+      205 +        CampaignID int64                   `json:"campaign_id"
+          +`                                                             
+      206 +        Status     string                  `json:"status"`    
+      207 +        Channels   map[string]statusCounts `json:"channels"`  
+      208 +        Total      map[string]int          `json:"total"`     
+      209 +        Rate       map[string]float64      `json:"rate_per_sec
+          +ond"` // sends/s over the last 5 s                            
+      210  }
+      211  
+      212  func (s *Server) readProgress(ctx context.Context, id int64) (
+           progress, error) {
+      220 -        p := progress{CampaignID: id, Channels: newChannelCoun
+          -ts(), Total: map[string]int{}, Rate: map[string]float64{}}    
+      213 +        p := progress{CampaignID: id, Channels: newChannelCoun
+          +ts(),                                                         
+      214 +                Total: map[string]int{"sms": 0, "email": 0}, R
+          +ate: map[string]float64{"sms": 0, "email": 0}}                
+      215          if err := s.pool.QueryRow(ctx, `SELECT status FROM cam
+           paigns WHERE id = $1`, id).Scan(&p.Status); err != nil {
+      216                  return p, err
+      217          }
+     ...
+      238                          p.Rate[ch] = float64(recent) / rateWin
+           dow.Seconds()
+      239                  }
+      240          }
+     … 9 more lines (ctrl+o to expand)
+  ⎿  Updated internal/api/server.go (+5 -1)
+      26          validator *segment.Validator
+      27          now       func() time.Time
+      28  
+      29 +        monitoring Monitoring                                  
+      30 +                                                               
+      31          // busy holds campaigns with an LLM step in progress, s
+          o a double click or a second
+      32          // tab can't run two generations (or a generation and a
+          n audience change) at once.
+      33          // In memory: the API runs as a single replica.
+     ...
+      38  func NewServer(pool *pgxpool.Pool, composer *compose.Composer, 
+          validator *segment.Validator) *Server {
+      39          return &Server{
+      40                  pool: pool, store: store.New(pool), composer: c
+          omposer, validator: validator,
+      39 -                now: time.Now, busy: map[int64]bool{},         
+      41 +                now: time.Now, busy: map[int64]bool{}, monitori
+         +ng: DefaultMonitoring(),                                       
+      42          }
+      43  }
+      44  
+     ...
+      53          mux.HandleFunc("POST /api/campaigns/{id}/messages", s.g
+          enerateMessages)
+      54          mux.HandleFunc("POST /api/campaigns/{id}/audience/refre
+          sh", s.refreshAudience)
+      55          mux.HandleFunc("POST /api/campaigns/{id}/approve", s.ap
+          prove)
+      56 +        mux.HandleFunc("GET /api/campaigns/{id}/events", s.camp
+         +aignEvents)                                                    
+      57 +        mux.HandleFunc("GET /api/metrics", s.metrics)          
+      58          return logRequests(mux)
+      59  }
+      60  
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Bash(python3 - <<'EOF'
+      p='internal/api/api_test.go'…)
+  ⎿  ok
+  ⎿  Updated internal/api/api_test.go (+10 -6)
+      30  var tooLongMessages = `{"sms":"Merhaba {{first_name}}, ` + stri
+          ngs.Repeat("çok uzun mesaj var ", 8) + `","email_subject":"Konu
+          ","email_body":"Gövde"}`
+      31  
+      32  type env struct {
+      33 -        t    *testing.T                                        
+      34 -        srv  *httptest.Server                                  
+      35 -        pool *pgxpool.Pool                                     
+      36 -        mock *llm.Mock                                         
+      33 +        t      *testing.T                                      
+      34 +        srv    *httptest.Server                                
+      35 +        server *api.Server                                     
+      36 +        pool   *pgxpool.Pool                                   
+      37 +        mock   *llm.Mock                                       
+      38  }
+      39  
+      40  // newEnv starts the API on a seeded database. With no replies 
+          the mock answers from its
+     ...
+      53          policy := compose.DefaultPolicy()
+      54          policy.BaseBackoff = time.Millisecond
+      55          composer := compose.New(mock, store.New(pool), policy)
+      55 -        srv := httptest.NewServer(api.NewServer(pool, composer,
+         - segment.NewValidator(cities)).Handler())                      
+      56 +        monitoring := api.DefaultMonitoring()                  
+      57 +        monitoring.PollInterval = 20 * time.Millisecond        
+      58 +        server := api.NewServer(pool, composer, segment.NewVali
+         +dator(cities)).WithMonitoring(monitoring)                      
+      59 +        srv := httptest.NewServer(server.Handler())            
+      60          t.Cleanup(srv.Close)
+      57 -        return &env{t: t, srv: srv, pool: pool, mock: mock}    
+      61 +        return &env{t: t, srv: srv, server: server, pool: pool,
+         + mock: mock}                                                   
+      62  }
+      63  
+      64  func (e *env) do(method, path string, body any) (int, map[strin
+          g]any) {
+
+⏺ Write(internal/api/monitoring_test.go)
+  ⎿  Wrote 244 lines to internal/api/monitoring_test.go
+       1 package api_test
+       2 
+       3 import (
+       4   "bufio"
+       5   "context"
+       6   "encoding/json"
+       7   "net"
+       8   "net/http"
+       9   "net/http/httptest"
+      10   "strings"
+     … +234 lines (ctrl+o to expand)
+
+⏺ Bash(python3 - <<'EOF'
+      p='docker-compose.yml'…)
+  ⎿  cmd/app/api.go
+     ok      github.com/denizsahiner/smart-campaign-composer/internal/api
+      2.828s
+     ok
+     github.com/denizsahiner/smart-campaign-composer/internal/backoff
+      0.
+     … +17 lines (ctrl+o to expand)
+  ⎿  Updated docker-compose.yml (+3 -0)
+      31      command: ["api"]
+      32      environment:
+      33        DATABASE_URL: postgres://composer:composer@postgres:5432/
+          composer?sslmode=disable
+      34 +      # Read live for GET /api/metrics; the API still answers i
+         +f either is down.                                              
+      35 +      WORKER_HEALTH_URL: http://worker:8081/healthz            
+      36 +      PROVIDER_URL: http://mock-provider:8090                  
+      37      # ANTHROPIC_API_KEY, LLM_PROVIDER, ANTHROPIC_MODEL... Witho
+          ut a .env (or without a
+      38      # key in it) the API runs on the mock LLM.
+      39      env_file:
+  ⎿  (timeout 6m 40s)
+
+⏺ gofmt bir dosyayı işaretledi; düzeltip API testlerinin gerçekten çalıştığını
+  (skip edilmediğini) kontrol ediyorum:
+
+⏺ Bash(docker run --rm --network scc-test -v "$PWD":/src -w /src -v
+      scc-gomod:/go/pkg/mod -v scc-gocache:/root/.cache/go-build -e
+      'TEST_DATABASE_URL=postgres://postgre…)
+  ⎿  --- PASS: TestApprovedCampaignIsFrozen (0.13s)
+     --- PASS: TestCampaignEvents (0.16s)
+     --- PASS: TestCampaignEventsCompleted (0.16s)
+     … +4 lines (ctrl+o to expand)
+  ⎿  Updated cmd/app/api.go (+1 -1)
+      46          monitoring.WorkerHealthURL = os.Getenv("WORKER_HEALTH_U
+          RL")
+      47          monitoring.ProviderURL = os.Getenv("PROVIDER_URL")
+      48          srv := &http.Server{
+      49 -                Addr:              listenAddr(),               
+      49 +                Addr: listenAddr(),                            
+      50                  Handler: api.NewServer(pool, composer, segment.
+          NewValidator(cities)).
+      51                          WithMonitoring(monitoring).Handler(),
+      52                  ReadHeaderTimeout: 10 * time.Second,
+
+  Ran 1 shell command (ctrl+o to expand)
+⏺ Test bozulan davranışı yakaladı. Şimdi canlı stack'te deniyorum:
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+⏺ Canlı akış çalışıyor: önce anlık progress, sayılar değiştikçe güncellemeler,
+  en sonda completed ile done geliyor. Belgeleri koda göre güncelliyorum:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Bash(python3 - <<'EOF'
+      p='docs/ARCHITECTURE_DRAFT.md'…)
+  ⎿   DECISIONS.md                  | 23 +++++++++++++++-
+      cmd/app/api.go                |  8 ++++--
+      docker-compose.yml            |  3 ++
+     … +7 lines (ctrl+o to expand)
+  ⎿  Updated DECISIONS.md (+22 -1)
+      289  
+      290  The worker opens a small `/healthz` that is healthy only if th
+           e DB answers and each
+      291  channel loop ran in the last 10 seconds, so a stuck loop is ca
+           ught, not just a dead
+      292 -process. The dashboard can't reach the worker, so the API's `/
+          -metrics` includes the                                         
+      292 +process. The dashboard can't reach the worker, so the API's `/
+          +api/metrics` includes the                                     
+      293  worker's health.
+      294  
+      295  ### Equal jitter for every backoff
+     ...
+      298  one helper. Full jitter (0 to d) spreads retries best but can 
+           retry almost immediately;
+      299  a symmetric ±20% barely spreads them. The per-channel limiter 
+           already smooths a herd of
+      300  retries, so the difference is small, and one rule is easier to
+            reason about.
+      301 +                                                              
+      302 +## Monitoring                                                 
+      303 +                                                              
+      304 +### Metrics live under /api and survive a dependency being dow
+          +n                                                             
+      305 +                                                              
+      306 +The frontend's nginx forwards only `/api` to the API, so metri
+          +cs are `GET /api/metrics`;                                    
+      307 +`/healthz` stays at the root, where Docker calls it. Besides t
+          +he database numbers, the                                      
+      308 +endpoint fetches the worker's health and the provider's totals
+          + live (1 s timeout each,                                      
+      309 +in parallel). A dependency that doesn't answer is reported as 
+          +`unreachable` inside a                                        
+      310 +`200`, rather than failing the whole response: the dashboard's
+          + job at that moment is to                                     
+      311 +show which part is down.                                      
+      312 +                                                              
+      313 +### The delivery stream ends on the campaign's status         
+      314 +                                                              
+      315 +`GET /api/campaigns/{id}/events` sends the current counts on c
+          +onnect and then only when                                     
+      316 +they change, plus a 15 s keep-alive comment. It ends with `don
+          +e` when the worker marks the                                  
+      317 +campaign `completed`, which happens exactly when no message is
+          + left open, so the final                                      
+      318 +event carries the final status rather than "approved, nothing 
+          +left". The send rate is                                       
+      319 +averaged over the last 5 seconds: smooth enough to read, at th
+          +e cost of trailing the real                                   
+      320 +rate when sending starts and stops. Each connection polls on i
+          +ts own; sharing one query                                     
+      321 +per campaign would only pay off with many viewers.            
+  ⎿  Updated docs/ARCHITECTURE_DRAFT.md (+48 -16)
+      36  | `DATABASE_URL` | set in compose | migrate, api, worker |
+      37  | `API_ADDR` | `:8080` | api |
+      38  | `ANTHROPIC_API_KEY`, `LLM_PROVIDER`, `ANTHROPIC_MODEL`, `LLM_
+          EFFORT_AUDIENCE`, `LLM_EFFORT_MESSAGES`, `LLM_REFUSAL_FALLBACK`
+           | see LLM | api |
+      39 -| `PROVIDER_URL` | `http://mock-provider:8090` | worker |      
+      39 +| `PROVIDER_URL` | `http://mock-provider:8090` | worker; api (p
+         +rovider totals in metrics) |                                   
+      40 +| `WORKER_HEALTH_URL` | `http://worker:8081/healthz` | api (wor
+         +ker health in metrics) |                                       
+      41  | `WORKER_HEALTH_ADDR` | `:8081` | worker |
+      42  | `WORKER_RATE_PER_CHANNEL` | `100` | worker |
+      43  | `WORKER_CONCURRENCY_PER_CHANNEL` | `32` | worker |
+     ...
+      90  - LLM call log: `llm_calls` table, one row per Claude call: cam
+          paign_id, step
+      91    ('audience' | 'messages'), prompt_version, raw_response, vali
+          dation_errors (jsonb),
+      92    repair_attempt, transport_attempt, input_tokens, output_token
+          s, latency_ms, created_at.
+      92 -  Feeds the LLM numbers in `/metrics`, makes failures debuggabl
+         -e, and gives concrete                                          
+      93 +  Feeds the LLM numbers in `/api/metrics`, makes failures debug
+         +gable, and gives concrete                                      
+      94    evidence of how Claude's output was validated and repaired.
+      95  - `campaigns` table:
+      96    id, brief (text), segment_rule (jsonb), sms_content, email_su
+          bject, email_body,
+     ...
+      323  | `POST /api/campaigns/{id}/approve` `{content}` | validates t
+           he final content and queues the messages |
+      324  | `GET /api/campaigns`, `GET /api/campaigns/{id}` | read |
+      325  | `GET /api/campaigns/{id}/events` | live delivery counts as a
+           n SSE stream (see Monitoring) |
+      325 -| `GET /metrics` | queue depth, message counts, LLM numbers, w
+          -orker health (see Monitoring) |                               
+      326 +| `GET /api/metrics` | queue depth, message counts, LLM number
+          +s, worker health, provider totals (see Monitoring) |          
+      327  | `GET /healthz` | DB ping |
+      328  
+      329  - The messages stream is a `POST` (it creates content), read b
+           y the frontend with
+     ...
+      546    - Mock provider `GET /healthz`: `200`.
+      547    - The runtime image has no shell or curl; compose healthchec
+           ks run
+      548      `/app healthcheck <url>`.
+      548 -- Metrics: `GET /metrics` returns plain JSON computed from the
+          - DB — no Prometheus — plus                                    
+      549 -  the worker's health, which the API fetches from the worker's
+          - `/healthz` (1 s timeout;                                     
+      550 -  `unreachable` if it doesn't answer), so the dashboard can sh
+          -ow it:                                                        
+      549 +- Metrics: `GET /api/metrics` (under `/api` because nginx forw
+          +ards only `/api` to the                                       
+      550 +  API; `/healthz` stays at the root for Docker) returns plain 
+          +JSON — no Prometheus:                                         
+      551    ```json
+      552    {
+      553      "queue_depth": {"sms": 120, "email": 340},
+      554 -    "messages": {"sms": {"sent": 900, "failed": 3, "retry_sche
+          -duled": 12}, "email": {"...": 0}},                            
+      555 -    "llm": {"calls": 42, "validation_failures": 5},           
+      556 -    "worker": {"status": "ok"}                                
+      554 +    "messages": {"sms": {"pending": 100, "sending": 8, "retry_
+          +scheduled": 12, "sent": 900,                                  
+     … 67 more lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ GET /api/metrics ve GET /api/campaigns/{id}/events (SSE) hazır. Bütün testler
+  geçiyor ve ikisini de canlı stack'te denedim. Değişiklikler feat/worker
+  branch'inde ama henüz commit etmedim.
+
+  GET /api/metrics
+  - Veritabanından gelenler:
+    - Kuyruk derinliği: pending + sending + retry_scheduled.
+    - Mesaj sayıları: kanal ve durum bazında, sıfır olan durumlar dahil.
+    - LLM: çağrı sayısı, validation hataları, cevapsız kalan çağrılar, ortalama
+      gecikme ve token toplamları.
+  - Worker'ın sağlığı ve provider'ın toplamları her istekte canlı alınıyor.
+    İkisine paralel gidiliyor, her biri için 1 sn timeout var.
+  - Worker veya provider cevap vermezse endpoint yine 200 dönüyor ve ilgili alan
+    unreachable oluyor. Sağlıksız bir cevap gelirse alan unavailable olup
+    nedenini de veriyor.
+  - Provider'a /deliveries?summary=1 ekledim. Metrics her çağrıda binlerce
+    teslim kaydını taşımasın diye yalnızca toplamları döndürüyor. Bu küçük bir
+    ek, konuşmamıştık.
+
+  GET /api/campaigns/{id}/events
+  - Bağlantı açılır açılmaz bir progress geliyor, sonra kampanya durumu ya da
+    sayılar değiştikçe yenisi. İçinde kanal × durum sayıları, kanal başına
+    toplam ve son 5 saniyenin gönderim hızı var.
+  - Worker kampanyayı completed yaptığında done geliyor ve stream kapanıyor.
+    Zaten tamamlanmış bir kampanya açılırsa tek progress ve ardından done
+    geliyor.
+  - 15 saniyede bir : ping gönderiliyor. Approve edilmemiş kampanya 409 
+    not_approved alıyor.
+
+  Canlı deneme: Yeni bir kampanyayı approve edip stream'i izledim. Sayılar her
+  saniye güncellendi, 698 mesaj yaklaşık 7 saniyede gitti ve 10. saniyede done +
+  completed geldi.
+
+  Hız 5 saniyelik ortalama olduğu için başta ve sonda gerçek hızın gerisinde
+  kalıyor. Aynı denemede hız alanı en fazla ~70/s gösterdi; gerçek hız ~100/s'ye
+  yakındı (698 mesaj ~7 saniyede gitti). Bu kararlaştırdığımız tasarımdan
+  geliyor, bir hata değil.
+
+  Testler: Akış (ilk durum, değişiklik, done), tamamlanmış kampanya, 409, ping
+  ve metrics için testler ekledim. Metrics testi worker sağlıksızken ve worker
+  ile provider'a hiç ulaşılamazken de doğru cevap verdiğini kontrol ediyor.
+  Stream'in sayı değişince olay göndermesini bilerek bozdum, test bunu yakaladı.
+
+  Ayrıca:
+  - Compose'da API'ye WORKER_HEALTH_URL ve PROVIDER_URL eklendi.
+  - Mimari belgesindeki Monitoring bölümü ve API tablosu artık gerçek uç
+    noktalara ve olay formatına göre yazılı.
+  - DECISIONS.md'ye iki yeni madde ekledim: metrics'in /api altında durması ve
+    stream'in kampanya durumuna göre kapanması.
+
+  Commit edeyim mi? Önceki gibi bir feat ve bir docs commit'i olarak atabilirim.
+  Sonrasında frontend dashboard'a geçebiliriz.
+
+✻ Baked for 4m 39s · done 4:43 PM
+
+※ recap: Kampanya sistemine gönderim ve izleme ekliyoruz. Metrics ve canlı teslimat akışı (SSE) `feat/worker` branch'inde hazır, testler geçiyor ama henüz commit edilmedi. Sıradaki adım commit için onayın, ardından dashboard'a geçmek.
+  ⎿  Read internal/api/monitoring_test.go (245 lines)
+  ⎿  Read internal/api/monitoring.go (298 lines)
+  ⎿  Read internal/worker/sender_test.go (70 lines)
+  ⎿  Read internal/worker/worker_integration_test.go (293 lines)
+  ⎿  Read internal/provider/provider_test.go (228 lines)
+
+⏺ Compacted while idle, before the prompt cache expired · turn off with 
+  "idleCompaction": false in settings.json
