@@ -103,6 +103,10 @@ func (c *Composer) run(ctx context.Context, campaignID int64, original llm.Reque
 
 	req := original
 	repairs, transportRetries := 0, 0
+	stepStart := c.now()
+	defer func() {
+		c.logStep(ctx, campaignID, original.Step, repairs, transportRetries, c.now().Sub(stepStart), exhausted, err)
+	}()
 	for {
 		started := false
 		if original.Step == llm.StepMessages {
@@ -134,6 +138,8 @@ func (c *Composer) run(ctx context.Context, campaignID int64, original llm.Reque
 			}
 			transportRetries++
 			wait := max(c.backoff(transportRetries), te.RetryAfter)
+			slog.WarnContext(ctx, "llm call failed, retrying", "campaign_id", campaignID, "step", original.Step,
+				"retry", transportRetries, "wait", wait.Round(time.Millisecond), "err", genErr)
 			// Silent before the first chunk; after it the UI has a half-drawn draft to clear.
 			if te.Partial || started {
 				emit(Event{Type: EventRetry, Reason: RetryInterrupted})
@@ -161,9 +167,35 @@ func (c *Composer) run(ctx context.Context, campaignID int64, original llm.Reque
 			return res.Raw, verr, nil
 		}
 		repairs++
+		slog.InfoContext(ctx, "llm answer invalid, asking for a repair", "campaign_id", campaignID,
+			"step", original.Step, "repair", repairs, "errors", len(verr.Errors))
 		emit(Event{Type: EventRetry, Reason: RetryInvalid, Errors: verr.Errors})
 		// Each round starts from the original request (see prompt.Repair).
 		req = prompt.Repair(original, res.Raw, verr)
+	}
+}
+
+// logStep logs how a step ended. Only a failure of the system is an error: an answer that
+// stayed invalid or a refusal goes back to the marketer (warn), an unmappable brief is
+// the marketer's to fix (info).
+func (c *Composer) logStep(ctx context.Context, campaignID int64, step llm.Step, repairs, retries int,
+	d time.Duration, exhausted *validation.Error, err error) {
+	args := []any{"campaign_id", campaignID, "step", step, "repairs", repairs, "transport_retries", retries,
+		"duration", d.Round(time.Millisecond)}
+	var refusal *llm.RefusalError
+	switch {
+	case ctx.Err() != nil:
+		slog.InfoContext(ctx, "llm step cancelled", args...)
+	case err == nil && exhausted == nil:
+		slog.InfoContext(ctx, "llm step done", args...)
+	case err == nil:
+		slog.WarnContext(ctx, "llm answer still invalid after repairs", append(args, "errors", exhausted.Error())...)
+	case errors.Is(err, prompt.ErrUnmappable):
+		slog.InfoContext(ctx, "brief can't be mapped to an audience", args...)
+	case errors.As(err, &refusal):
+		slog.WarnContext(ctx, "llm refused", append(args, "err", err)...)
+	default:
+		slog.ErrorContext(ctx, "llm step failed", append(args, "err", err)...)
 	}
 }
 
@@ -174,7 +206,7 @@ func (c *Composer) record(ctx context.Context, call Call) {
 	// The log row matters most when the request was cancelled or failed, so don't let
 	// the request's cancellation drop it.
 	if err := c.recorder.RecordCall(context.WithoutCancel(ctx), call); err != nil {
-		slog.Warn("record llm call", "campaign_id", call.CampaignID, "step", call.Step, "err", err)
+		slog.WarnContext(ctx, "record llm call failed", "campaign_id", call.CampaignID, "step", call.Step, "err", err)
 	}
 }
 

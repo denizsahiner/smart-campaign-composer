@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { mount as vtuMount, flushPromises, RouterLinkStub } from '@vue/test-utils'
 import Monitoring from '../src/views/Monitoring.vue'
 import { jsonResponse, mockFetch } from './helpers'
 
@@ -21,6 +21,12 @@ function metrics(overrides = {}) {
   }
 }
 
+const SUMMARY = 'GET /api/logs/summary?since_hours=24'
+const mount = (c) => vtuMount(c, { global: { stubs: { RouterLink: RouterLinkStub } } })
+// mockFetch with the log summary answered, unless routes say otherwise.
+const routesWith = (routes, summary = { errors: 0, warnings: 0 }) => mockFetch({ [SUMMARY]: () => jsonResponse(200, summary), ...routes })
+const metricsCalls = (calls) => calls.filter((c) => c.key === 'GET /api/metrics')
+
 const row = (w, label) => w.findAll('tr').find((r) => r.find('th').text() === label)
 const cells = (r) => r.findAll('td').map((td) => td.text())
 const service = (w, name) => w.findAll('.services li').find((li) => li.text().startsWith(name))
@@ -30,7 +36,7 @@ afterEach(() => vi.useRealTimers())
 
 describe('Monitoring', () => {
   it('shows services, queue, message counts and Claude stats', async () => {
-    mockFetch({ 'GET /api/metrics': () => jsonResponse(200, metrics()) })
+    routesWith({ 'GET /api/metrics': () => jsonResponse(200, metrics()) })
     const w = mount(Monitoring)
     await flushPromises()
 
@@ -45,7 +51,7 @@ describe('Monitoring', () => {
   })
 
   it("lists every rejection reason either channel saw, with Turkish labels", async () => {
-    mockFetch({ 'GET /api/metrics': () => jsonResponse(200, metrics()) })
+    routesWith({ 'GET /api/metrics': () => jsonResponse(200, metrics()) })
     const w = mount(Monitoring)
     await flushPromises()
     expect(cells(row(w, 'Tekrar (aynı mesaj)'))).toEqual(['2', '2'])
@@ -55,7 +61,7 @@ describe('Monitoring', () => {
   })
 
   it('reports a dependency that is down and hides the provider table without totals', async () => {
-    mockFetch({
+    routesWith({
       'GET /api/metrics': () => jsonResponse(200, metrics({
         worker: { status: 'unavailable', error: 'no heartbeat for 30s' },
         provider: { status: 'unreachable', error: 'dial tcp: connection refused' },
@@ -72,36 +78,36 @@ describe('Monitoring', () => {
   it('says when a dependency is not configured', async () => {
     const m = metrics()
     delete m.worker
-    mockFetch({ 'GET /api/metrics': () => jsonResponse(200, m) })
+    routesWith({ 'GET /api/metrics': () => jsonResponse(200, m) })
     const w = mount(Monitoring)
     await flushPromises()
     expect(service(w, 'Worker').text()).toContain('Raporlanmıyor')
   })
 
   it('polls every 3 seconds and stops when it leaves the page', async () => {
-    const calls = mockFetch({ 'GET /api/metrics': () => jsonResponse(200, metrics()) })
+    const calls = routesWith({ 'GET /api/metrics': () => jsonResponse(200, metrics()) })
     const w = mount(Monitoring)
     await flushPromises()
-    expect(calls).toHaveLength(1)
+    expect(metricsCalls(calls)).toHaveLength(1)
     await vi.advanceTimersByTimeAsync(3000)
-    expect(calls).toHaveLength(2)
+    expect(metricsCalls(calls)).toHaveLength(2)
     w.unmount()
     await vi.advanceTimersByTimeAsync(9000)
-    expect(calls).toHaveLength(2)
+    expect(metricsCalls(calls)).toHaveLength(2)
   })
 
   it('does not poll while the tab is hidden', async () => {
-    const calls = mockFetch({ 'GET /api/metrics': () => jsonResponse(200, metrics()) })
+    const calls = routesWith({ 'GET /api/metrics': () => jsonResponse(200, metrics()) })
     mount(Monitoring)
     await flushPromises()
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
     await vi.advanceTimersByTimeAsync(9000)
-    expect(calls).toHaveLength(1)
+    expect(metricsCalls(calls)).toHaveLength(1)
   })
 
   it('keeps the last values when the API goes away', async () => {
     let up = true
-    mockFetch({ 'GET /api/metrics': () => (up ? jsonResponse(200, metrics()) : Promise.reject(new TypeError('Failed to fetch'))) })
+    routesWith({ 'GET /api/metrics': () => (up ? jsonResponse(200, metrics()) : Promise.reject(new TypeError('Failed to fetch'))) })
     const w = mount(Monitoring)
     await flushPromises()
     up = false
@@ -112,9 +118,28 @@ describe('Monitoring', () => {
   })
 
   it('shows the API error message when metrics fail', async () => {
-    mockFetch({ 'GET /api/metrics': () => jsonResponse(500, { error: { code: 'internal', message: 'Something went wrong on our side.' } }) })
+    routesWith({ 'GET /api/metrics': () => jsonResponse(500, { error: { code: 'internal', message: 'Something went wrong on our side.' } }) })
     const w = mount(Monitoring)
     await flushPromises()
     expect(w.text()).toContain('Something went wrong on our side.')
+  })
+
+  it('summarises the last 24 hours of logged problems and links to the logs page', async () => {
+    routesWith({ 'GET /api/metrics': () => jsonResponse(200, metrics()) }, { errors: 2, warnings: 41 })
+    const w = mount(Monitoring)
+    await flushPromises()
+    expect(w.text()).toContain('Son 24 saatte 2 hata, 41 uyarı.')
+    expect(w.findComponent(RouterLinkStub).props('to')).toBe('/logs')
+  })
+
+  it('still shows the metrics when the log summary fails', async () => {
+    routesWith({
+      'GET /api/metrics': () => jsonResponse(200, metrics()),
+      [SUMMARY]: () => jsonResponse(500, { error: { code: 'internal', message: 'x' } }),
+    })
+    const w = mount(Monitoring)
+    await flushPromises()
+    expect(w.text()).toContain('Log özeti alınamadı.')
+    expect(service(w, 'Worker').text()).toContain('Çalışıyor')
   })
 })

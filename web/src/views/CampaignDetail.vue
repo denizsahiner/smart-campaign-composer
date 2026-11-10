@@ -7,6 +7,10 @@
       <StatusBadge :status="c.status" />
     </div>
     <p class="small muted lead">Oluşturuldu {{ new Date(c.created_at).toLocaleString('tr-TR') }}</p>
+    <p v-if="logErrors" class="notice error row spread problems">
+      <span>Bu kampanyada {{ logErrors.toLocaleString('tr-TR') }} hata kaydedildi.</span>
+      <RouterLink :to="`/logs?campaign_id=${c.id}&level=error`"><BaseButton variant="secondary">Logları gör</BaseButton></RouterLink>
+    </p>
 
     <section class="section">
       <h2 class="heading">Brief</h2>
@@ -134,6 +138,7 @@ const messageError = ref('')
 const fieldErrors = ref([])
 const approveError = ref(null)
 const queued = ref(null)
+const logErrors = ref(0)
 let abort = null
 
 const editable = computed(() => c.value && (c.value.status === 'draft' || c.value.status === 'ready'))
@@ -169,6 +174,15 @@ function apply(campaign) {
   brief.value = campaign.brief
   if (campaign.content && !generating.value) draft.value = { ...campaign.content }
   fieldErrors.value = campaign.content_errors || []
+  checkLogs()
+}
+
+// Errors logged for this campaign (a failed Claude call, a message given up on, a 500).
+// Warnings such as retries are normal and don't count. Re-checked after every action.
+async function checkLogs() {
+  try {
+    logErrors.value = (await api.logSummary({ campaign_id: props.id, level: 'error' })).errors
+  } catch { /* the notice is a convenience; the logs page has the full picture */ }
 }
 
 onMounted(async () => {
@@ -222,6 +236,7 @@ async function generate() {
     generating.value = false
     streamNote.value = ''
     streamText.value = ''
+    checkLogs()
   }
 }
 
@@ -237,6 +252,7 @@ async function approve() {
 
 <style scoped>
 .lead { margin-top: var(--space-1); }
+.problems { margin-top: var(--space-4); }
 .quote { font: italic 400 18px/28px var(--font-serif); }
 .metrics { display: flex; gap: var(--space-8); padding: var(--space-4) 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .metric { color: var(--brand); }

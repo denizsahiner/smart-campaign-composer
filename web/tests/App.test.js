@@ -10,7 +10,7 @@ async function at(path) {
   mockFetch({ 'GET /healthz': () => jsonResponse(200, { status: 'ok', db: 'ok' }) })
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: ['/', '/new', '/campaigns/:id', '/monitoring'].map((p) => ({ path: p, component: Empty })),
+    routes: ['/', '/new', '/campaigns/:id', '/monitoring', '/logs'].map((p) => ({ path: p, component: Empty })),
   })
   router.push(path)
   await router.isReady()
@@ -33,6 +33,7 @@ describe('top navigation', () => {
     ['/', ['Kampanyalar']],
     ['/campaigns/7', ['Kampanyalar']],
     ['/monitoring', ['İzleme']],
+    ['/logs', ['İzleme']],
     ['/new', []],
   ])('marks the current section on %s', async (path, expected) => {
     expect(current(await at(path))).toEqual(expected)

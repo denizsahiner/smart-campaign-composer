@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/denizsahiner/smart-campaign-composer/internal/db"
+	"github.com/denizsahiner/smart-campaign-composer/internal/logging"
 	"github.com/denizsahiner/smart-campaign-composer/internal/seed"
 )
 
@@ -23,15 +24,37 @@ const (
 	seedValue = 42
 )
 
+// logConfig is the logger setup of this process; the service is the subcommand.
+var logConfig logging.Config
+
+// withLogSink adds the database sink (warnings and errors, for the logs page) to the
+// default logger. The returned func flushes it; call it before closing the pool.
+func withLogSink(pool *pgxpool.Pool) (closeSink func()) {
+	sink := logging.NewSink(pool, logConfig.Console())
+	slog.SetDefault(logging.New(logConfig, sink.Handler(logConfig.Level)))
+	return func() {
+		slog.SetDefault(logging.New(logConfig))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		sink.Close(ctx)
+	}
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: app migrate | api | worker | mock-provider | healthcheck [url] | llm-try \"<brief>\"")
 		os.Exit(2)
 	}
+	var err error
+	if logConfig, err = logging.ConfigFromEnv(os.Args[1]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	slog.SetDefault(logging.New(logConfig))
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var err error
 	switch os.Args[1] {
 	case "migrate":
 		err = runMigrate(ctx)

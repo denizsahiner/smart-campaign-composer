@@ -89,27 +89,33 @@ func (c *channel) pauseRemaining() time.Duration {
 	return time.Until(c.pausedUntil)
 }
 
-// pause stops sends on the channel for d (never shortens a longer pause).
-func (c *channel) pause(d time.Duration) {
+// pause stops sends on the channel for d (never shortens a longer pause). It reports
+// whether the channel wasn't already paused, so a pause is logged once, not once per
+// in-flight send that hit it.
+func (c *channel) pause(d time.Duration) (started bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if until := time.Now().Add(d); until.After(c.pausedUntil) {
+	now := time.Now()
+	started = !c.pausedUntil.After(now)
+	if until := now.Add(d); until.After(c.pausedUntil) {
 		c.pausedUntil = until
 	}
+	return started
 }
 
 // unreachable starts the next, longer pause (1s, 2s, 4s ... 30s) and returns its length.
-// Failures arriving during a pause (the other in-flight sends) join it instead of growing it.
-func (c *channel) unreachable() time.Duration {
+// Failures arriving during a pause (the other in-flight sends) join it instead of growing
+// it; started is false for those.
+func (c *channel) unreachable() (d time.Duration, started bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if left := time.Until(c.pausedUntil); left > 0 {
-		return left
+		return left, false
 	}
 	c.unreachableStreak++
-	d := backoff.Exponential(time.Second, c.unreachableStreak, maxUnreachablePause)
+	d = backoff.Exponential(time.Second, c.unreachableStreak, maxUnreachablePause)
 	c.pausedUntil = time.Now().Add(d)
-	return d
+	return d, true
 }
 
 // reached resets the unreachable streak: the provider answered.
@@ -206,37 +212,56 @@ func (w *Worker) handBack(ctx context.Context, m Message, delay time.Duration) {
 	})
 }
 
+// apply writes the outcome of a send and logs it. Per-message lines are logged only once
+// the write went through: a stale result belongs to a newer attempt, which logs its own.
+// A sent message is debug (100 a second per channel would drown everything else), a
+// scheduled retry warn, a message given up on error. A pause is logged once per channel.
 func (w *Worker) apply(ctx context.Context, ch *channel, m Message, out Outcome) {
 	if out.Kind != Unreachable {
 		ch.reached()
 	}
+	log := slog.With("campaign_id", m.CampaignID, "message_id", m.ID, "channel", m.Channel, "attempt", m.Attempts)
 	switch out.Kind {
 	case Sent:
-		w.final(ctx, m, out, func(c context.Context) (bool, error) {
+		if w.final(ctx, m, out, func(c context.Context) (bool, error) {
 			return w.queue.MarkSent(c, m, out.ProviderMessageID)
-		})
+		}) {
+			log.Debug("message sent")
+		}
 	case Permanent:
-		w.final(ctx, m, out, func(c context.Context) (bool, error) {
+		if w.final(ctx, m, out, func(c context.Context) (bool, error) {
 			return w.queue.MarkFailed(c, m, out.Err)
-		})
+		}) {
+			log.Error("message failed", "reason", "rejected by provider", "err", out.Err)
+		}
 	case Retry:
 		if m.Attempts >= w.cfg.MaxAttempts {
-			w.final(ctx, m, out, func(c context.Context) (bool, error) {
+			if w.final(ctx, m, out, func(c context.Context) (bool, error) {
 				return w.queue.MarkFailed(c, m, out.Err)
-			})
+			}) {
+				log.Error("message failed", "reason", "retries exhausted", "err", out.Err)
+			}
 			return
 		}
 		delay := w.jitter(backoff.Exponential(w.cfg.BackoffBase, m.Attempts, 0))
-		w.write(ctx, m, out.Kind.String(), func(c context.Context) (bool, error) {
+		if w.write(ctx, m, out.Kind.String(), func(c context.Context) (bool, error) {
 			return w.queue.Reschedule(c, m, delay, out.Err, false)
-		})
+		}) {
+			log.Warn("send failed, retry scheduled", "retry_in", delay.Round(time.Millisecond), "err", out.Err)
+		}
 	case Throttled:
-		ch.pause(out.RetryAfter)
+		if ch.pause(out.RetryAfter) {
+			slog.Warn("channel throttled by provider", "channel", ch.name, "pause", out.RetryAfter)
+		}
+		log.Debug("message throttled, handed back")
 		w.write(ctx, m, out.Kind.String(), func(c context.Context) (bool, error) {
 			return w.queue.Reschedule(c, m, out.RetryAfter, out.Err, true)
 		})
 	case Unreachable:
-		d := ch.unreachable()
+		d, started := ch.unreachable()
+		if started {
+			slog.Warn("provider unreachable, channel paused", "channel", ch.name, "pause", d, "err", out.Err)
+		}
 		w.write(ctx, m, out.Kind.String(), func(c context.Context) (bool, error) {
 			return w.queue.Reschedule(c, m, d, out.Err, true)
 		})
@@ -244,12 +269,15 @@ func (w *Worker) apply(ctx context.Context, ch *channel, m Message, out Outcome)
 }
 
 // final writes a terminal state and remembers the campaign for the completion check.
-func (w *Worker) final(ctx context.Context, m Message, out Outcome, fn func(context.Context) (bool, error)) {
-	if w.write(ctx, m, out.Kind.String(), fn) {
-		w.mu.Lock()
-		w.touched[m.CampaignID] = true
-		w.mu.Unlock()
+// It reports whether the write went through.
+func (w *Worker) final(ctx context.Context, m Message, out Outcome, fn func(context.Context) (bool, error)) bool {
+	if !w.write(ctx, m, out.Kind.String(), fn) {
+		return false
 	}
+	w.mu.Lock()
+	w.touched[m.CampaignID] = true
+	w.mu.Unlock()
+	return true
 }
 
 // write runs a fenced result write, even during shutdown. A write the fence rejected
@@ -261,9 +289,9 @@ func (w *Worker) write(ctx context.Context, m Message, what string, fn func(cont
 	switch {
 	case err != nil:
 		// The row stays 'sending' and comes back when its lease expires.
-		slog.Error("result write failed", "message_id", m.ID, "outcome", what, "err", err)
+		slog.Error("result write failed", "campaign_id", m.CampaignID, "message_id", m.ID, "outcome", what, "err", err)
 	case !ok:
-		slog.Warn("stale result dropped", "message_id", m.ID, "attempt", m.Attempts, "outcome", what)
+		slog.Warn("stale result dropped", "campaign_id", m.CampaignID, "message_id", m.ID, "attempt", m.Attempts, "outcome", what)
 	}
 	return ok && err == nil
 }

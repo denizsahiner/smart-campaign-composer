@@ -90,7 +90,7 @@ func (s *Server) generateMessages(w http.ResponseWriter, r *http.Request) {
 		return // cancelled, or an error event has been sent
 	}
 	if err := s.store.SetContent(r.Context(), c.ID, res.Content, in.Language, res.Errors); err != nil {
-		slog.Error("store draft", "campaign_id", c.ID, "err", err)
+		slog.ErrorContext(r.Context(), "store draft failed", "err", err)
 		sse.send(compose.Event{Type: compose.EventError, Message: "The draft couldn't be saved. Please try again."})
 		return
 	}

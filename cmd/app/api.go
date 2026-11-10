@@ -14,6 +14,7 @@ import (
 	"github.com/denizsahiner/smart-campaign-composer/internal/api"
 	"github.com/denizsahiner/smart-campaign-composer/internal/compose"
 	"github.com/denizsahiner/smart-campaign-composer/internal/llm"
+	"github.com/denizsahiner/smart-campaign-composer/internal/logging"
 	"github.com/denizsahiner/smart-campaign-composer/internal/segment"
 	"github.com/denizsahiner/smart-campaign-composer/internal/store"
 )
@@ -26,11 +27,20 @@ func runAPI(ctx context.Context) error {
 	if dsn == "" {
 		return errors.New("DATABASE_URL is not set")
 	}
+	var e envError
+	retentionDays := e.int("LOG_RETENTION_DAYS", 7)
+	if err := e.err(); err != nil {
+		return err
+	}
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer pool.Close()
+	defer withLogSink(pool)()
+	if retentionDays > 0 {
+		go logging.PruneEvery(ctx, pool, time.Duration(retentionDays)*24*time.Hour, time.Hour)
+	}
 
 	// The city list is fixed once the seed is loaded (migrate runs before the API).
 	cities, err := segment.KnownCities(ctx, pool)

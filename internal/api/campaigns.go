@@ -12,6 +12,7 @@ import (
 	"github.com/denizsahiner/smart-campaign-composer/internal/compose"
 	"github.com/denizsahiner/smart-campaign-composer/internal/content"
 	"github.com/denizsahiner/smart-campaign-composer/internal/llm"
+	"github.com/denizsahiner/smart-campaign-composer/internal/logging"
 	"github.com/denizsahiner/smart-campaign-composer/internal/prompt"
 	"github.com/denizsahiner/smart-campaign-composer/internal/segment"
 	"github.com/denizsahiner/smart-campaign-composer/internal/store"
@@ -135,6 +136,7 @@ func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
 		internalError(w, r, err)
 		return
 	}
+	logging.Add(r.Context(), "campaign_id", id)
 	s.lock(id) // new campaign: nobody else can hold it yet
 	defer s.unlock(id)
 	s.respondAudience(w, r, id, brief, http.StatusCreated)

@@ -1,11 +1,24 @@
 // Thin client for the Go API. Errors from the API arrive as {error:{code,message,errors}}.
+// A server-side failure (500) also carries request_id: it goes into the message, so every
+// place that shows an error shows the code to report and to search on the logs page.
 export class ApiError extends Error {
   constructor(status, body) {
-    super(body?.error?.message || `Request failed (${status})`)
+    const message = body?.error?.message || `Request failed (${status})`
+    const requestId = body?.error?.request_id
+    super(requestId ? `${message} Hata kodu: ${requestId}` : message)
     this.status = status
     this.code = body?.error?.code
     this.fields = body?.error?.errors || []
+    this.requestId = requestId
   }
+}
+
+// Query string from the non-empty values of params ('' when there are none).
+function query(params = {}) {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') q.set(k, v)
+  const s = q.toString()
+  return s ? `?${s}` : ''
 }
 
 async function call(method, path, body) {
@@ -28,6 +41,11 @@ export const api = {
   refreshAudience: (id) => call('POST', `/api/campaigns/${id}/audience/refresh`),
   approve: (id, content) => call('POST', `/api/campaigns/${id}/approve`, { content }),
   metrics: () => call('GET', '/api/metrics'),
+  // Stored warnings and errors, newest first. Filters: level (warn | error), service,
+  // campaign_id, request_id, q; paging: before (the previous page's next_before), limit.
+  logs: (params) => call('GET', `/api/logs${query(params)}`),
+  // {errors, warnings} matching the same filters, plus since_hours.
+  logSummary: (params) => call('GET', `/api/logs/summary${query(params)}`),
 }
 
 // Health of the API and its database. Never throws: an unreachable API is a status too.

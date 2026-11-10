@@ -10,10 +10,12 @@ const props = defineProps({ status: { type: String, required: true } })
 const MAP = {
   draft: 'muted', ready: 'brand', approved: 'success', completed: 'success',
   pending: 'muted', sending: 'brand', sent: 'success', retry_scheduled: 'warning', failed: 'danger', skipped: 'muted',
+  warn: 'warning', error: 'danger',
 }
 const LABELS = {
   draft: 'Taslak', ready: 'Hazır', approved: 'Onaylandı', completed: 'Tamamlandı',
   pending: 'Bekliyor', sending: 'Gönderiliyor', sent: 'Gönderildi', retry_scheduled: 'Yeniden denenecek', failed: 'Başarısız', skipped: 'Atlandı',
+  warn: 'Uyarı', error: 'Hata',
 }
 const color = computed(() => MAP[props.status] || 'muted')
 const text = computed(() => {

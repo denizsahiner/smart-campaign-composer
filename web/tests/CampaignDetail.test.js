@@ -1,16 +1,27 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { mount, flushPromises, RouterLinkStub } from '@vue/test-utils'
 import CampaignDetail from '../src/views/CampaignDetail.vue'
 import { campaign, jsonResponse, sseResponse, sse, mockFetch, FakeEventSource } from './helpers'
 
 const GOOD = { sms: 'Merhaba {{first_name}}, sepetin seni bekliyor!', email_subject: '%30 indirim', email_body: 'Sepetindekiler hâlâ orada.' }
 
-async function open(c, routes = {}) {
-  const calls = mockFetch({ 'GET /api/campaigns/7': () => jsonResponse(200, c), ...routes })
-  const w = mount(CampaignDetail, { props: { id: '7' } })
+const SUMMARY = 'GET /api/logs/summary?campaign_id=7&level=error'
+const mountDetail = () => mount(CampaignDetail, { props: { id: '7' }, global: { stubs: { RouterLink: RouterLinkStub } } })
+
+// errors: what the log summary reports for the campaign.
+async function open(c, routes = {}, { errors = 0 } = {}) {
+  const calls = mockFetch({
+    'GET /api/campaigns/7': () => jsonResponse(200, c),
+    [SUMMARY]: () => jsonResponse(200, { errors, warnings: 3 }),
+    ...routes,
+  })
+  const w = mountDetail()
   await flushPromises()
   return { w, calls }
 }
+
+// The last call other than the log summary checks that follow every action.
+const lastAction = (calls) => calls.filter((x) => x.key !== SUMMARY).at(-1)
 
 const button = (w, text) => w.findAll('button').find((b) => b.text().replace('…', '') === text)
 const approveButton = (w) => button(w, 'Onayla ve gönder')
@@ -28,9 +39,41 @@ describe('loading', () => {
 
   it('shows a load error', async () => {
     mockFetch({ 'GET /api/campaigns/7': () => jsonResponse(404, { error: { code: 'not_found', message: 'Campaign not found.' } }) })
-    const w = mount(CampaignDetail, { props: { id: '7' } })
+    const w = mountDetail()
     await flushPromises()
     expect(w.text()).toContain('Campaign not found.')
+  })
+})
+
+describe('logged problems', () => {
+  it('says nothing when no error was logged for the campaign (retry warnings do not count)', async () => {
+    const { w } = await open(campaign())
+    expect(w.find('.problems').exists()).toBe(false)
+  })
+
+  it('says how many errors were logged and links to them on the logs page', async () => {
+    const { w } = await open(campaign(), {}, { errors: 2 })
+    expect(w.find('.problems').text()).toContain('Bu kampanyada 2 hata kaydedildi.')
+    expect(w.findComponent(RouterLinkStub).props('to')).toBe('/logs?campaign_id=7&level=error')
+  })
+
+  it('checks again after an action', async () => {
+    let errors = 0
+    const { w } = await open(campaign(), {
+      'POST /api/campaigns/7/audience': () => { errors = 1; return jsonResponse(200, { campaign: campaign(), audience_error: { code: 'llm_unavailable', message: 'Claude is busy.' } }) },
+      [SUMMARY]: () => jsonResponse(200, { errors, warnings: 0 }),
+    })
+    expect(w.find('.problems').exists()).toBe(false)
+    await w.find('textarea').setValue('yeni brief')
+    await button(w, 'Kitleyi yeniden oluştur').trigger('click')
+    await flushPromises()
+    expect(w.find('.problems').text()).toContain('1 hata')
+  })
+
+  it('still shows the campaign when the summary fails', async () => {
+    const { w } = await open(campaign(), { [SUMMARY]: () => jsonResponse(500, { error: { code: 'internal', message: 'x' } }) })
+    expect(w.text()).toContain('Kampanya 7')
+    expect(w.find('.problems').exists()).toBe(false)
   })
 })
 
@@ -111,7 +154,7 @@ describe('audience actions', () => {
     const { w, calls } = await open(stale, { 'POST /api/campaigns/7/audience/refresh': () => jsonResponse(200, campaign({ content: GOOD })) })
     await button(w, 'Kitleyi yenile').trigger('click')
     await flushPromises()
-    expect(calls.at(-1).key).toBe('POST /api/campaigns/7/audience/refresh')
+    expect(lastAction(calls).key).toBe('POST /api/campaigns/7/audience/refresh')
     expect(button(w, 'Kitleyi yenile')).toBeUndefined()
     expect(approveButton(w).attributes('disabled')).toBeUndefined()
   })
@@ -128,7 +171,7 @@ describe('audience actions', () => {
     await w.find('textarea[rows="4"]').setValue("  Ay'da yaşayanlar  ")
     await rerun.trigger('click')
     await flushPromises()
-    expect(calls.at(-1)).toEqual({ key: 'POST /api/campaigns/7/audience', body: { brief: "Ay'da yaşayanlar" } })
+    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/audience', body: { brief: "Ay'da yaşayanlar" } })
     expect(w.text()).toContain('Nothing in the brief can be expressed as an audience: Ay')
     expect(w.text()).not.toContain('Hedef kitle')
   })
@@ -170,7 +213,7 @@ describe('message generation', () => {
     await w.find('input.feedback').setValue('daha resmi')
     await button(w, 'Revize et').trigger('click')
     await flushPromises()
-    expect(calls.at(-1)).toEqual({ key: 'POST /api/campaigns/7/messages', body: { feedback: 'daha resmi' } })
+    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/messages', body: { feedback: 'daha resmi' } })
     expect(w.find('textarea[rows="3"]').element.value).toBe('Daha resmi')
     expect(w.find('input.feedback').element.value).toBe('')
   })
@@ -209,7 +252,7 @@ describe('approval', () => {
     await approveButton(w).trigger('click')
     await flushPromises()
 
-    expect(calls.at(-1)).toEqual({ key: 'POST /api/campaigns/7/approve', body: { content: { ...GOOD, sms: 'Elle düzenlendi {{first_name}}' } } })
+    expect(lastAction(calls)).toEqual({ key: 'POST /api/campaigns/7/approve', body: { content: { ...GOOD, sms: 'Elle düzenlendi {{first_name}}' } } })
     expect(w.text()).toContain('Kuyruğa alındı: 900 SMS ve 1.000 e-posta.')
     expect(w.text()).toContain('3 SMS ve 0 e-posta isimsiz gider')
     expect(approveButton(w)).toBeUndefined()

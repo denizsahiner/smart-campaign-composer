@@ -13,6 +13,12 @@ describe('ApiError', () => {
     expect(e.fields).toEqual([{ path: 'sms', code: 'too_long', message: 'too long' }])
   })
 
+  it('adds the request ID of a server-side failure to the message, as the code to report', () => {
+    const e = new ApiError(500, { error: { code: 'internal', message: 'Something went wrong on our side.', request_id: 'a1b2c3' } })
+    expect(e.message).toBe('Something went wrong on our side. Hata kodu: a1b2c3')
+    expect(e.requestId).toBe('a1b2c3')
+  })
+
   it('falls back to a generic message when the body is not an API error', () => {
     const e = new ApiError(502, null)
     expect(e.message).toBe('Request failed (502)')
@@ -26,6 +32,16 @@ describe('api calls', () => {
     const calls = mockFetch({ 'POST /api/campaigns': () => jsonResponse(201, { campaign: { id: 3 } }) })
     await expect(api.create('brief')).resolves.toEqual({ campaign: { id: 3 } })
     expect(calls).toEqual([{ key: 'POST /api/campaigns', body: { brief: 'brief' } }])
+  })
+
+  it('sends only the log filters that are set', async () => {
+    const calls = mockFetch({
+      'GET /api/logs?level=error&campaign_id=7': () => jsonResponse(200, { logs: [], next_before: null }),
+      'GET /api/logs/summary': () => jsonResponse(200, { errors: 0, warnings: 0 }),
+    })
+    await api.logs({ level: 'error', service: '', campaign_id: 7, q: undefined })
+    await api.logSummary()
+    expect(calls.map((c) => c.key)).toEqual(['GET /api/logs?level=error&campaign_id=7', 'GET /api/logs/summary'])
   })
 
   it('unwraps the campaign list', async () => {

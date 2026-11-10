@@ -4,7 +4,7 @@
       <RouterLink to="/" class="brand">Smart Campaign Composer</RouterLink>
       <nav class="row">
         <RouterLink to="/" class="nav small" :class="{ current: onCampaigns }">Kampanyalar</RouterLink>
-        <RouterLink to="/monitoring" class="nav small" :class="{ current: route.path === '/monitoring' }">
+        <RouterLink to="/monitoring" class="nav small" :class="{ current: onMonitoring }">
           <i class="dot" :class="healthTone" :title="healthText" />İzleme
           <span class="sr-only">({{ healthText }})</span>
         </RouterLink>
@@ -25,6 +25,8 @@ import { health } from './api'
 const route = useRoute()
 // A campaign's own page counts as part of the campaign list.
 const onCampaigns = computed(() => route.path === '/' || route.path.startsWith('/campaigns/'))
+// The logs page is reached from monitoring and counts as part of it.
+const onMonitoring = computed(() => route.path === '/monitoring' || route.path === '/logs')
 
 const HEALTH_MS = 15000
 const h = ref(null)

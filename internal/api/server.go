@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/denizsahiner/smart-campaign-composer/internal/compose"
+	"github.com/denizsahiner/smart-campaign-composer/internal/logging"
 	"github.com/denizsahiner/smart-campaign-composer/internal/segment"
 	"github.com/denizsahiner/smart-campaign-composer/internal/store"
 	"github.com/denizsahiner/smart-campaign-composer/internal/validation"
@@ -57,6 +58,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/campaigns/{id}/approve", s.approve)
 	mux.HandleFunc("GET /api/campaigns/{id}/events", s.campaignEvents)
 	mux.HandleFunc("GET /api/metrics", s.metrics)
+	mux.HandleFunc("GET /api/logs", s.listLogs)
+	mux.HandleFunc("GET /api/logs/summary", s.logSummary)
 	if s.staticDir != "" {
 		// The least specific GET pattern: wrong methods on API routes still get 405.
 		mux.Handle("GET /", staticHandler(s.staticDir))
@@ -91,11 +94,13 @@ func (s *Server) unlock(id int64) {
 	delete(s.busy, id)
 }
 
-// apiError is the body of every error response.
+// apiError is the body of every error response. RequestID is set on 500s: the UI shows
+// it, and it finds the error on the logs page.
 type apiError struct {
-	Code    string                  `json:"code"`
-	Message string                  `json:"message"`
-	Errors  []validation.FieldError `json:"errors,omitempty"`
+	Code      string                  `json:"code"`
+	Message   string                  `json:"message"`
+	Errors    []validation.FieldError `json:"errors,omitempty"`
+	RequestID string                  `json:"request_id,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -109,8 +114,14 @@ func writeError(w http.ResponseWriter, status int, code, msg string, errs ...val
 }
 
 func internalError(w http.ResponseWriter, r *http.Request, err error) {
-	slog.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
-	writeError(w, http.StatusInternalServerError, "internal", "Something went wrong on our side.")
+	slog.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "err", err)
+	writeInternal(w, r)
+}
+
+func writeInternal(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusInternalServerError, map[string]apiError{"error": {
+		Code: "internal", Message: "Something went wrong on our side.", RequestID: logging.RequestID(r.Context()),
+	}})
 }
 
 // decode reads a small JSON body strictly.
@@ -132,6 +143,7 @@ func (s *Server) campaign(w http.ResponseWriter, r *http.Request) (store.Campaig
 		writeError(w, http.StatusNotFound, "not_found", "Campaign not found.")
 		return store.Campaign{}, false
 	}
+	logging.Add(r.Context(), "campaign_id", id)
 	c, err := s.store.Get(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "Campaign not found.")
@@ -178,15 +190,23 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
-// logRequests logs every request (except health checks) and recovers handler panics.
-// The recovery runs first, so a recovered panic is logged as a 500.
+// logRequests gives each request a request ID (the caller's X-Request-ID if it sent a
+// usable one), returns it in X-Request-ID and adds it to everything logged with the
+// request's context. It logs every request (except health checks) and recovers handler
+// panics; the recovery runs first, so a recovered panic is logged as a 500.
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := logging.NewRequestID(r.Header.Get("X-Request-ID"))
+		ctx := logging.WithScope(r.Context())
+		logging.Add(ctx, "request_id", id)
+		r = r.WithContext(ctx)
+		w.Header().Set("X-Request-ID", id)
+
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
 		defer func() {
 			if r.URL.Path != "/healthz" {
-				slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", rec.status,
+				slog.InfoContext(ctx, "request", "method", r.Method, "path", r.URL.Path, "status", rec.status,
 					"duration", time.Since(start).Round(time.Millisecond))
 			}
 		}()
@@ -208,9 +228,10 @@ func recoverPanic(w *statusRecorder, r *http.Request) {
 	if v == http.ErrAbortHandler {
 		panic(v)
 	}
-	slog.Error("panic", "method", r.Method, "path", r.URL.Path, "panic", v, "stack", string(debug.Stack()))
+	slog.ErrorContext(r.Context(), "panic", "method", r.Method, "path", r.URL.Path, "panic", v,
+		"stack", string(debug.Stack()))
 	if w.started {
 		panic(http.ErrAbortHandler)
 	}
-	writeError(w, http.StatusInternalServerError, "internal", "Something went wrong on our side.")
+	writeInternal(w, r)
 }

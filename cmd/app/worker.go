@@ -61,6 +61,7 @@ func runWorker(ctx context.Context) error {
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer pool.Close()
+	defer withLogSink(pool)()
 
 	w := worker.New(cfg, worker.NewQueue(pool), worker.NewHTTPSender(providerURL, httpTimeout))
 	health := &http.Server{

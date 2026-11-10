@@ -13,6 +13,18 @@
 
     <template v-if="m">
       <section class="section">
+        <div class="row spread">
+          <h2 class="heading">Hatalar</h2>
+          <RouterLink to="/logs" class="small">Loglara git →</RouterLink>
+        </div>
+        <p v-if="logSummary" :class="logSummary.errors ? 'notice error' : 'muted'">
+          Son 24 saatte {{ fmt(logSummary.errors) }} hata, {{ fmt(logSummary.warnings) }} uyarı.
+        </p>
+        <p v-else class="muted">Log özeti alınamadı.</p>
+        <p class="small muted">Uyarıların çoğu sahte sağlayıcının hatalarından sonra planlanan yeniden denemelerdir; hatalar kalıcı başarısızlıklardır.</p>
+      </section>
+
+      <section class="section">
         <h2 class="heading">Servisler</h2>
         <ul class="services">
           <li v-for="s in services" :key="s.name" class="card row spread">
@@ -112,6 +124,7 @@ const SERVICE_TEXT = {
 }
 
 const m = ref(null)
+const logSummary = ref(null)
 const error = ref('')
 const updatedAt = ref(null)
 let timer = null
@@ -140,6 +153,8 @@ const rejectReasons = computed(() => {
 async function load() {
   if (inFlight || document.hidden) return
   inFlight = true
+  // The log summary is fetched alongside; if only it fails, the metrics still show.
+  const summary = api.logSummary({ since_hours: 24 }).catch(() => null)
   try {
     m.value = await api.metrics()
     error.value = ''
@@ -147,6 +162,7 @@ async function load() {
   } catch (e) {
     error.value = e.status ? e.message : 'API\'ye ulaşılamıyor.'
   } finally {
+    logSummary.value = await summary
     inFlight = false
   }
 }

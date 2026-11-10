@@ -1,8 +1,11 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http/httptest"
 	"strconv"
@@ -262,7 +265,7 @@ func TestUnreachableProviderRefundsAndPauses(t *testing.T) {
 	ch.mu.Lock()
 	ch.pausedUntil = time.Time{}
 	ch.mu.Unlock()
-	if d := ch.unreachable(); d != 2*time.Second {
+	if d, _ := ch.unreachable(); d != 2*time.Second {
 		t.Fatalf("second pause %v, want 2s", d)
 	}
 }
@@ -288,5 +291,54 @@ func TestRetriesExhaustToFailed(t *testing.T) {
 	pool.QueryRow(context.Background(), `SELECT count(*) FROM messages WHERE attempts = 3 AND last_error LIKE '5%'`).Scan(&n)
 	if n != 6 {
 		t.Errorf("%d messages failed after 3 attempts with a 5xx, want 6", n)
+	}
+}
+
+// Each retry is a warning and each message given up on an error, both with the campaign
+// and the message, so the logs page can show a campaign's delivery problems.
+func TestSendOutcomesAreLogged(t *testing.T) {
+	pool := dbtest.New(t)
+	cid := queueCampaign(t, pool, 3) // plus one permanent failure per channel
+	p := provider.New(provider.Config{ErrorRate: 1, Seed: 1})
+	ts := httptest.NewServer(p.Handler())
+	defer ts.Close()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	cfg := testConfig()
+	cfg.MaxAttempts = 2
+	cfg.BackoffBase = time.Millisecond
+	w := New(cfg, NewQueue(pool), NewHTTPSender(ts.URL, time.Second))
+	runUntilDone(t, pool, w, 30*time.Second)
+
+	count := map[string]int{}
+	for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+		var l struct {
+			Level      string `json:"level"`
+			Msg        string `json:"msg"`
+			Reason     string `json:"reason"`
+			CampaignID int64  `json:"campaign_id"`
+			MessageID  int64  `json:"message_id"`
+		}
+		json.Unmarshal(line, &l)
+		if l.Msg != "send failed, retry scheduled" && l.Msg != "message failed" {
+			continue
+		}
+		if l.CampaignID != cid || l.MessageID == 0 {
+			t.Errorf("line without campaign or message: %s", line)
+		}
+		count[l.Level+" "+l.Msg+" "+l.Reason]++
+	}
+	// 3 good recipients per channel: 1 retry then given up. The bad one is rejected at once.
+	want := map[string]int{
+		"WARN send failed, retry scheduled ":        6,
+		"ERROR message failed retries exhausted":    6,
+		"ERROR message failed rejected by provider": 2,
+	}
+	if fmt.Sprint(count) != fmt.Sprint(want) {
+		t.Errorf("logged %v, want %v", count, want)
 	}
 }
