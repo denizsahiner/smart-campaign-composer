@@ -130,6 +130,25 @@ Claude'un çıktısı SQL'e ya da bir alıcıya ulaşmadan önce her zaman backe
 - `GET /api/campaigns/{id}/events`: kampanya başına teslim sayıları ve gönderim hızını
   veren SSE akışı; kampanya tamamlanınca kapanır.
 
+### Loglar
+
+- Her servis stdout'a JSON log yazar (`LOG_FORMAT=text` ile düz metin). Her satırda
+  `service` alanı vardır; kampanyaya ait satırlarda `campaign_id`, mesaja ait satırlarda
+  `message_id` bulunur. Böylece bir kampanyanın API'den worker'a kadar bütün kaydı tek
+  bir alanla filtrelenebilir:
+  `docker compose logs api worker --no-log-prefix | jq 'select(.campaign_id == 6)'`.
+- Her istek bir request ID alır ve bu ID `X-Request-ID` header'ında döner. 500 cevabında
+  ID ayrıca gövdede bulunur; arayüz bunu "Hata kodu" olarak gösterir.
+- API ve worker'ın **uyarı ve hataları** ayrıca Postgres'teki `app_logs` tablosuna
+  yazılır. Yazma, istekleri ve gönderimleri bekletmez: kayıtlar arka planda toplu olarak
+  eklenir. Kayıtlar `LOG_RETENTION_DAYS` (varsayılan 7) gün sonra silinir.
+- **Loglar** sayfasında (`/logs`, İzleme'den açılır) bu kayıtlar seviye, servis, kampanya,
+  hata kodu ya da metinle filtrelenir. İzleme sayfası son 24 saatin hata ve uyarı sayısını
+  gösterir. Kampanya sayfası, o kampanya için hata kaydedildiyse bir uyarı ve loglara
+  giden bir bağlantı gösterir.
+- Bilgi seviyesindeki loglar (her istek, her LLM adımının sonucu) DB'ye yazılmaz; yalnızca
+  `docker compose logs` ile görülür.
+
 ## Testler
 
 ```sh
@@ -172,6 +191,7 @@ cmd/app/            giriş noktası: migrate | api | worker | mock-provider | he
 internal/llm        Claude ve mock istemciler, hata sınıflandırma
 internal/prompt     adım prompt'ları, JSON şemaları, düzeltme istekleri
 internal/compose    düzeltme ve bağlantı tekrarı bütçeleriyle LLM adımları
+internal/logging    JSON logger, istek kapsamı (request_id, campaign_id), DB'ye log yazımı
 internal/segment    kitle DSL'i, doğrulama, SQL query builder
 internal/content    içerik doğrulama ve alıcı başına metin üretimi
 internal/api        HTTP handler'lar, SSE akışları, metrikler

@@ -320,6 +320,42 @@ averaged over the last 5 seconds: smooth enough to read, at the cost of trailing
 rate when sending starts and stops. Each connection polls on its own; sharing one query
 per campaign would only pay off with many viewers.
 
+### Logs: stdout for everything, Postgres for warnings and errors
+
+Every service logs JSON to stdout with a `service` attribute; `docker compose logs` is the
+complete record. Warnings and errors of the API and the worker are also written to an
+`app_logs` table and shown on a logs page, so a problem can be found from the UI without
+a shell. We considered Loki + Grafana: better search and dashboards, but two or three more
+containers and their config for a project that should come up with one command. A log
+file in a volume would add rotation and still not be searchable from the UI. Slack alerts
+notify, they don't store.
+
+Keeping the table cheap and harmless:
+
+- Only warn and error are stored. A request line or a sent message is info/debug: at 100
+  sends a second per channel they would be most of the writes and none of the value.
+- The sink buffers records and inserts them in batches (COPY, every second or 200 rows)
+  on its own goroutine. When the buffer is full, records are dropped and the drop is
+  reported on stdout: logging never slows a request or a send.
+- If the database is down, its own errors can't be stored; they are still on stdout.
+  The sink reports its failures through the stdout handler only, so it never feeds
+  itself.
+- The API deletes rows older than `LOG_RETENTION_DAYS` (default 7) every hour.
+
+`campaign_id` is how a campaign's story is followed end to end. A request ID can't do it:
+the queue sits between the API and the worker. So every log line about a campaign carries
+`campaign_id`, from the request that loaded it (added to the request's log scope once the
+handler knows the campaign), the LLM steps and the worker's sends. Each request gets a
+request ID (a valid incoming `X-Request-ID` is kept), returned in the header and, on a
+500, in the error body, which the UI shows as "Hata kodu" for the logs page's filter.
+
+What counts as an error decides what the campaign page flags. With the mock provider's
+default 5% errors and 429 windows, retries are routine, so they are warnings; a message
+given up on (rejected, or out of attempts), a failed LLM step and a 500 are errors. A
+draft that stays invalid or a refusal is a warning: the marketer handles it on screen. A
+throttle or an unreachable provider is logged once per channel pause, not once per
+message that hit it.
+
 ## Frontend
 
 ### The API serves the built frontend; no nginx
