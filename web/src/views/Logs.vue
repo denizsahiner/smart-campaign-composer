@@ -44,7 +44,7 @@
     </form>
 
     <p v-if="error" class="notice error section-gap">{{ error }}</p>
-    <p v-else-if="logs === null" class="muted section-gap">Yükleniyor…</p>
+    <LoadingNote v-else-if="logs === null" class="section-gap" />
     <p v-else-if="!logs.length" class="muted section-gap">
       {{ filtered ? 'Bu filtrelerle eşleşen kayıt yok.' : 'Kayıtlı uyarı ya da hata yok.' }}
     </p>
@@ -82,6 +82,7 @@
 
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
+import LoadingNote from '../components/LoadingNote.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import BaseButton from '../components/BaseButton.vue'

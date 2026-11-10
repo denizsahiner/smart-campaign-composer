@@ -1,4 +1,7 @@
 *, *::before, *::after { box-sizing: border-box; }
+/* Always reserve the scrollbar's space, so the centred layout doesn't shift sideways when
+   a page becomes long enough to scroll (e.g. when its data arrives after a tab switch). */
+html { scrollbar-gutter: stable; }
 body { margin: 0; background: var(--surface-100); color: var(--ink); font: 400 15px/22px var(--font-sans); }
 a { color: var(--brand); }
 :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }

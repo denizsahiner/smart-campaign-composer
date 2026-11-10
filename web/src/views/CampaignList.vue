@@ -2,7 +2,7 @@
   <div class="stack">
     <h1 class="title">Kampanyalar</h1>
     <p v-if="error" class="notice error">{{ error }}</p>
-    <p v-else-if="campaigns === null" class="muted">Yükleniyor…</p>
+    <LoadingNote v-else-if="campaigns === null" />
     <div v-else-if="!campaigns.length" class="card">
       <p>Henüz kampanya yok. Tek cümlelik bir brief yazın, Claude hedef kitleyi ve mesajları önersin.</p>
       <RouterLink to="/new"><BaseButton>Yeni kampanya</BaseButton></RouterLink>
@@ -27,6 +27,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import LoadingNote from '../components/LoadingNote.vue'
 import { api } from '../api'
 import BaseButton from '../components/BaseButton.vue'
 import StatusBadge from '../components/StatusBadge.vue'

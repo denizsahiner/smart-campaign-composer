@@ -1,6 +1,6 @@
 <template>
   <p v-if="loadError" class="notice error">{{ loadError }}</p>
-  <p v-else-if="!c" class="muted">Yükleniyor…</p>
+  <LoadingNote v-else-if="!c" />
   <div v-else>
     <div class="row spread">
       <h1 class="title">Kampanya {{ c.id }}</h1>
@@ -166,6 +166,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import LoadingNote from '../components/LoadingNote.vue'
 import { api, generateMessages } from '../api'
 import BaseButton from '../components/BaseButton.vue'
 import StatusBadge from '../components/StatusBadge.vue'

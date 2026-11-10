@@ -9,7 +9,7 @@
     <p class="small muted lead">Tüm kampanyalar genelinde kuyruk, teslimat, Claude çağrıları ve bağımlı servislerin durumu.</p>
 
     <p v-if="error" class="notice error section-gap">{{ error }}<template v-if="m"> Son alınan değerler gösteriliyor.</template></p>
-    <p v-if="!m && !error" class="muted section-gap">Yükleniyor…</p>
+    <LoadingNote v-if="!m && !error" class="section-gap" />
 
     <template v-if="m">
       <section class="section">
@@ -103,6 +103,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import LoadingNote from '../components/LoadingNote.vue'
 import { api } from '../api'
 import StatusBadge from '../components/StatusBadge.vue'
 
