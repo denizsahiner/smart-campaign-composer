@@ -174,7 +174,8 @@ Claude'un çıktısı SQL'e ya da bir alıcıya ulaşmadan önce her zaman backe
 make test        # Go testleri + frontend testleri (Vitest)
 ```
 
-API anahtarı gerekmez, LLM mock'lanır. Go 1.26+ ve Node 18+ gerekir.
+API anahtarı gerekmez, LLM mock'lanır. Gerekenler: Docker (entegrasyon testleri için
+Postgres), Go 1.26+ ve Node 18+ (frontend testleri).
 
 Veritabanı entegrasyon testleri (onay, worker claim/lease, izin filtresi, mock sağlayıcıya
 karşı uçtan uca gönderim) `make test` ile birlikte koşar: `make test-go`, compose'daki
@@ -211,11 +212,20 @@ internal/segment    kitle DSL'i, doğrulama, SQL query builder
 internal/content    içerik doğrulama ve alıcı başına metin üretimi
 internal/api        HTTP handler'lar, SSE akışları, metrikler
 internal/store      Postgres erişimi (campaigns, messages, llm_calls)
+internal/db         migration'lar (internal/db/migrations)
+internal/dbtest     entegrasyon testleri için geçici, migrate edilmiş veritabanı
+internal/backoff    jitter'lı üstel backoff
+internal/validation model çıktısı doğrulayıcıları için ortak hata tipi
 internal/worker     claim döngüleri, hız limiti, retry
 internal/provider   mock SMS/e-posta sağlayıcı
 internal/seed       deterministik sahte kullanıcılar ve olaylar
 web/                Vue frontend ve testleri
-ai-sessions/        Claude Code oturum kayıtları
+ai-sessions/        Claude Code oturum kayıtları (/export), tarih sırasıyla:
+                      1. case analizi ve ilk mimari kararlar
+                      2. LLM katmanı: kitle DSL'i, doğrulama, düzeltme döngüsü
+                      3. mock sağlayıcı, worker, metrikler ve SSE
+                      4. Vue arayüzü
+                      5. loglama ve son eklemeler
 ```
 
 ## Yapılmayanlar / bilinen sınırlamalar
