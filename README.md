@@ -39,7 +39,7 @@ Her ayarın çalışan bir varsayılanı var; hepsi [`.env.example`](.env.exampl
 ### Deneyin
 
 1. **Yeni kampanya** sayfasına şu isteği yazıp **Oluştur**'a basın:
-   `İstanbul'da son 30 günde sepetine ürün ekleyip satın almayanlara %30 indirim hatırlatması gönder. Samimi ama kısa olsun.`
+   `Son 30 gün içinde sepetine ürün ekleyip satın alma yapmayan İstanbul'daki kullanıcılara %30 indirim hatırlatması gönder. Samimi ama kısa olsun.`
 2. Hedef kitle, kanal başına kaç kişiye ulaşılacağıyla birlikte gelir (izin filtresi
    uygulanmış haliyle). İstekte kitle kurallarıyla ifade edilemeyen bir şey varsa
    listelenir; devam etmeden önce **Anladım, devam et** ile onaylamanız gerekir.
@@ -114,7 +114,7 @@ Claude'un çıktısı SQL'e ya da bir alıcıya ulaşmadan önce her zaman backe
 ### Gönderim: her mesaj en fazla bir kez teslim edilir
 
 - **Onay tek bir transaction.** Son içerik aynı doğrulayıcıdan geçer, kampanya koşullu
-  bir update ile `ready → approved` olur. Kişiselleştirilmiş mesajlar Go'da üretilip
+  bir update ile onaylanır. Kişiselleştirilmiş mesajlar Go'da üretilip
   `UNIQUE (campaign_id, user_id, channel)` kısıtıyla eklenir. Çift tıklama ya da ikinci
   sekme `409` alır, hiçbir şey iki kez kuyruğa girmez.
 - **Zamanlanmış gönderim.** Onayda "İleri tarihte gönder" seçilirse alıcılar ve metinler
@@ -158,15 +158,10 @@ Claude'un çıktısı SQL'e ya da bir alıcıya ulaşmadan önce her zaman backe
   `docker compose logs api worker --no-log-prefix | jq 'select(.campaign_id == 6)'`.
 - Her istek bir request ID alır ve bu ID `X-Request-ID` header'ında döner. 500 cevabında
   ID ayrıca gövdede bulunur; arayüz bunu "Hata kodu" olarak gösterir.
-- API ve worker'ın **uyarı ve hataları** ayrıca Postgres'teki `app_logs` tablosuna
-  yazılır. Yazma, istekleri ve gönderimleri bekletmez: kayıtlar arka planda toplu olarak
-  eklenir. Kayıtlar `LOG_RETENTION_DAYS` (varsayılan 7) gün sonra silinir.
-- **Loglar** sayfasında (`/logs`, İzleme'den açılır) bu kayıtlar seviye, servis, kampanya,
-  hata kodu ya da metinle filtrelenir. İzleme sayfası son 24 saatin hata ve uyarı sayısını
-  gösterir. Kampanya sayfası, o kampanya için hata kaydedildiyse bir uyarı ve loglara
-  giden bir bağlantı gösterir.
-- Bilgi seviyesindeki loglar (her istek, her LLM adımının sonucu) DB'ye yazılmaz; yalnızca
-  `docker compose logs` ile görülür.
+- API ve worker'ın uyarı ve hataları ayrıca Postgres'e yazılır ve **Loglar** sayfasında
+  (`/logs`, İzleme'den açılır) seviye, servis, kampanya, hata kodu ya da metinle
+  filtrelenir. Kayıtlar `LOG_RETENTION_DAYS` (varsayılan 7) gün sonra silinir. Bilgi
+  seviyesindeki loglar yalnızca `docker compose logs` ile görülür.
 
 ## Testler
 
@@ -174,19 +169,15 @@ Claude'un çıktısı SQL'e ya da bir alıcıya ulaşmadan önce her zaman backe
 make test        # Go testleri + frontend testleri (Vitest)
 ```
 
-API anahtarı gerekmez, LLM mock'lanır. Gerekenler: Docker (entegrasyon testleri için
-Postgres), Go 1.26+ ve Node 18+ (frontend testleri).
+API anahtarı gerekmez, LLM mock'lanır. Gerekenler: Docker, Go 1.26+ ve Node 18+.
 
-Veritabanı entegrasyon testleri (onay, worker claim/lease, izin filtresi, mock sağlayıcıya
-karşı uçtan uca gönderim) `make test` ile birlikte koşar: `make test-go`, compose'daki
-Postgres'i kendisi başlatır, testlerden sonra (kendisi başlattıysa) durdurur. Gereken tek
-şey Docker. Docker yoksa test sessizce atlanmaz, net bir hata verir. Kendi Postgres'inizi
-kullanmak için `TEST_DATABASE_URL` verin; o zaman container başlatılmaz. Her test paketi
-kendi geçici veritabanını açar ve sonunda siler; sistemdeki veriye dokunulmaz.
-Veritabanı olmadan, entegrasyon testleri atlanarak koşmak için: `make test-db-less`.
+Veritabanı entegrasyon testleri için `make test` compose'daki Postgres'i kendisi başlatır;
+her test paketi kendi geçici veritabanını kullanır, mevcut veriye dokunulmaz. Kendi
+Postgres'inizi kullanmak için `TEST_DATABASE_URL` verin. Entegrasyon testlerini atlayarak
+koşmak için: `make test-db-less`.
 
-Tek bir istek için iki LLM adımını gerçek API'ye karşı denemek için (Go container'ında
-çalışır):
+Tek bir istek için iki LLM adımını `.env`'deki anahtarla denemek için (Go container'ında
+çalışır; anahtar yoksa mock kullanılır):
 
 ```sh
 make llm-try BRIEF="İstanbul'da son 30 günde sepetini terk edenlere %30 indirim"
@@ -221,11 +212,13 @@ internal/provider   mock SMS/e-posta sağlayıcı
 internal/seed       deterministik sahte kullanıcılar ve olaylar
 web/                Vue frontend ve testleri
 ai-sessions/        Claude Code oturum kayıtları (/export), tarih sırasıyla:
-                      1. case analizi ve ilk mimari kararlar
-                      2. LLM katmanı: kitle DSL'i, doğrulama, düzeltme döngüsü
+                      1. case analizi, ilk mimari kararlar, sahte veri üretimi
+                      2. LLM katmanı (kitle DSL'i, doğrulama, düzeltme döngüsü),
+                         kampanya API'si ve onay
                       3. mock sağlayıcı, worker, metrikler ve SSE
                       4. Vue arayüzü
-                      5. loglama ve son eklemeler
+                      5. loglama, gönderilemeyen alıcılar, alıcının dilinde içerik,
+                         zamanlanmış gönderim
 ```
 
 ## Yapılmayanlar / bilinen sınırlamalar
