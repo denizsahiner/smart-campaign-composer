@@ -12,9 +12,6 @@ dosyasında.
 kanal) için bu tabloya bir satır ekleniyor, worker satırları `FOR UPDATE SKIP LOCKED` ile
 alıyor. Onay ve kuyruğa alma aynı transaction'da oluyor.
 
-<!-- TODO: Postgres'i kuyruk seçme gerekçeni buraya kendi cümlelerinle yaz (oturumlarda
-bu konu hiç tartışılmadı, taslakta da sebep yazmıyor). -->
-
 ### Tek Go binary, her rol ayrı container
 
 `api`, `worker`, `mock-provider` ve `migrate` aynı binary'nin farklı komutları. Aynı model,
